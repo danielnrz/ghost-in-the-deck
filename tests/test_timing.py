@@ -19,13 +19,15 @@ from pathlib import Path
 
 from ghost_in_the_deck.animation.controller import AvatarAnimator
 from ghost_in_the_deck.animation.cues import BeatTimeline
+from ghost_in_the_deck.animation.groove import GrooveEngine
 from ghost_in_the_deck.sync import TimingRecorder
 
-from synthetic import RecordingRig, make_beat_track, make_features, regular_beats
+from synthetic import RecordingRig, groove_for, make_beat_track, make_features, regular_beats
 
 BPM = 120.0
 BEATS = regular_beats(bpm=BPM, count=24, offset=0.5)   # 0.5 s apart, 0.5 .. 12.0
 TIMELINE = BeatTimeline(make_features(BEATS, duration=14.0, bpm=BPM))
+GROOVE = groove_for(BEATS, duration=14.0, bpm=BPM, seed="timing")
 
 # Probe times chosen to land at awkward places: just after a beat, mid-decay,
 # long after a beat, and between beats.
@@ -67,7 +69,7 @@ SCHEDULES = {
 def pose_after(schedule: list[float], probe: float) -> dict:
     """Replay ``schedule`` up to ``probe``, then draw ``probe``."""
     rig = RecordingRig()
-    animator = AvatarAnimator(rig, TIMELINE)
+    animator = AvatarAnimator(rig, GROOVE)
     for frame in schedule:
         if frame >= probe:
             break
@@ -79,7 +81,7 @@ def pose_after(schedule: list[float], probe: float) -> dict:
 def reference_pose(probe: float) -> dict:
     """The pose with no history at all."""
     rig = RecordingRig()
-    AvatarAnimator(rig, TIMELINE).apply_at(probe)
+    AvatarAnimator(rig, GROOVE).apply_at(probe)
     return rig.pose()
 
 
@@ -108,7 +110,7 @@ class TestScheduleIndependence(unittest.TestCase):
 
     def test_replaying_the_same_frame_is_idempotent(self):
         rig = RecordingRig()
-        animator = AvatarAnimator(rig, TIMELINE)
+        animator = AvatarAnimator(rig, GROOVE)
         animator.apply_at(3.3)
         once = rig.pose()
         for _ in range(5):
@@ -120,26 +122,23 @@ class TestNoDriftAfterStalls(unittest.TestCase):
     """The specific failure the old accumulate-and-clamp design had."""
 
     def test_sway_has_no_accumulated_phase_error(self):
-        """Sway is a function of playback time, not of summed frame deltas."""
+        """Sway is a function of the beat grid, not of summed frame deltas."""
         for name in ("stall 250 ms", "stall 500 ms", "stall 1000 ms"):
             schedule = SCHEDULES[name]
             probe = 11.5
             rig = RecordingRig()
-            animator = AvatarAnimator(rig, TIMELINE)
+            animator = AvatarAnimator(rig, GROOVE)
             for frame in schedule:
                 if frame >= probe:
                     break
                 animator.apply_at(frame)
             state = animator.apply_at(probe)
+            expected = math.sin(2.0 * math.pi * TIMELINE.phase_at(probe).bar_phase)
             with self.subTest(schedule=name):
-                self.assertAlmostEqual(
-                    state.sway,
-                    math.sin(2.0 * math.pi * probe / animator.sway_period),
-                    places=12,
-                )
+                self.assertAlmostEqual(state.sway, expected, places=12)
 
     def test_first_frame_after_a_stall_shows_the_current_beat(self):
-        animator = AvatarAnimator(RecordingRig(), TIMELINE)
+        animator = AvatarAnimator(RecordingRig(), GROOVE)
         for stall in (0.25, 0.5, 1.0, 2.0):
             before = 3.01
             after = before + stall
@@ -160,12 +159,12 @@ class TestNoDriftAfterStalls(unittest.TestCase):
 
     def test_missed_beats_are_not_replayed_in_a_burst(self):
         """A stall must not leave a queue of beats to fire on the next frame."""
-        animator = AvatarAnimator(RecordingRig(), TIMELINE)
+        animator = AvatarAnimator(RecordingRig(), GROOVE)
         animator.apply_at(2.0)
         state = animator.apply_at(5.0)   # six beats went by with no frame
         self.assertEqual(state.beat_index, TIMELINE.index_before(5.0))
-        self.assertLessEqual(state.impulse, 1.0)
-        self.assertEqual(state.impulse, animator.state_at(5.0).impulse)
+        self.assertLessEqual(state.pulse, 1.0)
+        self.assertEqual(state.pulse, animator.state_at(5.0).pulse)
 
 
 class TestTimelineIsStateless(unittest.TestCase):
@@ -181,9 +180,9 @@ class TestTimelineIsStateless(unittest.TestCase):
     def test_before_the_first_beat_there_is_no_cue(self):
         self.assertIsNone(TIMELINE.cue_before(0.0))
         self.assertEqual(TIMELINE.index_before(0.0), -1)
-        state = AvatarAnimator(RecordingRig(), TIMELINE).state_at(0.1)
+        state = AvatarAnimator(RecordingRig(), GROOVE).state_at(0.1)
         self.assertFalse(state.has_beat)
-        self.assertEqual(state.impulse, 0.0)
+        self.assertEqual(state.pulse, 0.0)
 
     def test_window_lookup_is_half_open(self):
         cues = TIMELINE.cues_in(0.5, 1.5)
@@ -195,7 +194,7 @@ class TestRecorderSeparatesTheTwoConcepts(unittest.TestCase):
 
     def _run(self, schedule: list[float]) -> TimingRecorder:
         rig = RecordingRig()
-        animator = AvatarAnimator(rig, TIMELINE)
+        animator = AvatarAnimator(rig, GROOVE)
         recorder = TimingRecorder(
             beat_times=BEATS, response_window=animator.response_window
         )
@@ -223,7 +222,7 @@ class TestRecorderSeparatesTheTwoConcepts(unittest.TestCase):
         fall entirely between samples and are provably uncatchable. Coverage must
         report exactly those, while the pose at every later time is still exact.
         """
-        window = AvatarAnimator(RecordingRig(), TIMELINE).response_window
+        window = AvatarAnimator(RecordingRig(), GROOVE).response_window
         schedule = [0.833 * i for i in range(1, 16)]
 
         # Independent oracle: which beats had no sample inside their window.
@@ -244,7 +243,7 @@ class TestRecorderSeparatesTheTwoConcepts(unittest.TestCase):
         # Coverage suffered; musical state did not.
         self.assertAlmostEqual(recorder.summary()["state_lag"]["max_ms"], 0.0, places=6)
         rig = RecordingRig()
-        animator = AvatarAnimator(rig, TIMELINE)
+        animator = AvatarAnimator(rig, GROOVE)
         for frame in schedule:
             animator.apply_at(frame)
         for probe in (11.0, 11.37, 11.5):
@@ -279,6 +278,7 @@ class TestEndToEndSyntheticTiming(unittest.TestCase):
         wav = make_beat_track(Path(cls._tmp.name) / "beat.wav", bpm=120.0, seconds=16.0)
         cls.features = analyse(wav)
         cls.timeline = BeatTimeline(cls.features)
+        cls.groove = GrooveEngine(cls.features, cls.timeline, seed="e2e")
 
     @classmethod
     def tearDownClass(cls):
@@ -295,16 +295,16 @@ class TestEndToEndSyntheticTiming(unittest.TestCase):
 
     def test_pose_is_schedule_independent_on_analysed_audio(self):
         rig = RecordingRig()
-        animator = AvatarAnimator(rig, self.timeline)
+        animator = AvatarAnimator(rig, self.groove)
         probes = [2.35, 5.05, 8.5, 11.1]
 
         for probe in probes:
             reference = RecordingRig()
-            AvatarAnimator(reference, self.timeline).apply_at(probe)
+            AvatarAnimator(reference, self.groove).apply_at(probe)
 
             for name in ("60 fps", "5 fps", "stall 1000 ms"):
                 rig.reset()
-                animator = AvatarAnimator(rig, self.timeline)
+                animator = AvatarAnimator(rig, self.groove)
                 for frame in SCHEDULES[name]:
                     if frame >= probe:
                         break
@@ -315,7 +315,7 @@ class TestEndToEndSyntheticTiming(unittest.TestCase):
 
     def test_every_beat_is_sampled_when_the_loop_keeps_up(self):
         rig = RecordingRig()
-        animator = AvatarAnimator(rig, self.timeline)
+        animator = AvatarAnimator(rig, self.groove)
         recorder = TimingRecorder(
             beat_times=self.features.beats, response_window=animator.response_window
         )

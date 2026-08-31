@@ -1,137 +1,150 @@
-"""Drives the rig from the motion timeline.
+"""Turns a GrooveState into joint rotations.
 
-The pose is a pure function of absolute playback time. Nothing is integrated
-across frames, so the sequence of render frames leading up to time T cannot
-change the pose produced at T. A renderer that stalls for a second simply misses
-frames; when it comes back it draws the pose the music calls for *now*, with no
-catching up and no accumulated drift.
+The neutral standing pose lives in the rig; this module produces only the
+movement stacked on top of it, scaled by how energetic the music is.
 
-This module knows nothing about beats, audio files or Panda3D windows; it reads
-cues from a BeatTimeline and writes joint offsets to an AvatarRig.
+It is a pure function of absolute playback time, so nothing is integrated
+across frames and the sequence of frames drawn before a moment cannot change the
+pose produced at it. A renderer that stalls for a second misses frames; when it
+comes back it draws the pose the music calls for now.
+
+This module knows nothing about audio files or Panda3D windows. It reads a
+GrooveState and writes joint offsets to an AvatarRig, which clamps them.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
+from .groove import GrooveEngine, GrooveState
 
-from .cues import BeatTimeline
+# ---------------------------------------------------------------------- gains
+# Peak degrees at full intensity. Kept together so the body can be retuned in
+# one place; every one of them is multiplied by the music's intensity.
+PELVIS_WEIGHT_ROLL = 2.4
+PELVIS_SWAY_HEADING = 1.6
+SPINE1_COUNTER_ROLL = 2.0          # keeps the torso over the feet
+SPINE2_SWAY_ROLL = 2.2
+SPINE2_SWAY_HEADING = 2.8
+SPINE3_SWAY_ROLL = 1.8
+SPINE3_BOUNCE_PITCH = 2.4
+NECK_BOUNCE_PITCH = 2.5
+NECK_PULSE_PITCH = 3.5
+HEAD_BOUNCE_PITCH = 3.5
+HEAD_PULSE_PITCH = 7.0
+HEAD_BIAS_HEADING = 3.0
+HEAD_SWAY_HEADING = 2.0
+HEAD_SWAY_ROLL = 2.5
+HEAD_BREATH_PITCH = 1.2
+CLAVICLE_BOUNCE = 1.8
+CLAVICLE_PULSE = 4.0
+UPPERARM_BOUNCE_PITCH = 2.0
+UPPERARM_SWAY_ROLL = 2.0
+LOWERARM_BOUNCE_PITCH = 2.5
+THIGH_WEIGHT_ROLL = 1.6
+KNEE_BOUNCE_PITCH = 2.5
+KNEE_WEIGHT_PITCH = 2.0
 
-# Peak rotation in degrees at full cue strength.
-NOD_HEAD = 13.0
-NOD_NECK = 6.0
-NOD_SPINE = 4.5
-SHOULDER_DROP = 7.0
-ARM_SWING = 5.0
-SWAY_SPINE = 3.5
-SWAY_HEAD = 2.0
-
-# Below this the impulse is treated as finished, so a pose that has decayed to
-# nothing compares exactly equal to the rest pose.
-IMPULSE_EPSILON = 1e-3
-
-
-@dataclass(frozen=True)
-class MotionState:
-    """The avatar's movement evaluated at one absolute playback time."""
-
-    time: float
-    impulse: float
-    sway: float
-    beat_index: int      # -1 before the first cue
-    beat_age: float      # seconds since that cue; inf when there is none
-
-    @property
-    def has_beat(self) -> bool:
-        return self.beat_index >= 0
+# How strongly the per-bar variation is allowed to unbalance the two sides.
+ASYMMETRY = 0.25
 
 
 class AvatarAnimator:
     """Evaluates the pose for a playback time and writes it to the rig."""
 
-    def __init__(
-        self,
-        rig,
-        timeline: BeatTimeline | None = None,
-        decay: float = 0.16,
-        sway_period: float = 2.0,
-    ):
+    def __init__(self, rig, groove: GrooveEngine | None = None):
         self.rig = rig
-        self.timeline = timeline
-        self.decay = decay          # seconds for the impulse to fall to ~37%
-        self.sway_period = sway_period
+        self.groove = groove
 
     @property
     def response_window(self) -> float:
-        """Reporting threshold: how soon after a cue a sample must occur to count.
+        """Reporting threshold shared with the timing instrumentation."""
+        return self.groove.response_window if self.groove else 0.48
 
-        This is a deliberate diagnostic choice, not a physical boundary. The
-        impulse is still mathematically non-zero past this point - it only
-        reaches IMPULSE_EPSILON after roughly seven decay constants - but three
-        decay constants leaves about 5% of the movement, below which counting a
-        sample as having captured the response would be generous.
+    def state_at(self, time: float) -> GrooveState | None:
+        return self.groove.state_at(time) if self.groove else None
 
-        Coverage reporting and the animation share this one definition so the
-        numbers and the movement cannot drift apart.
-        """
-        return self.decay * 3.0
-
-    def state_at(self, time: float) -> MotionState:
-        """The pose at ``time``, derived only from ``time`` and the timeline."""
-        impulse = 0.0
-        beat_index = -1
-        beat_age = math.inf
-
-        if self.timeline is not None:
-            latest = self.timeline.cue_before(time)
-            if latest is not None:
-                beat_index = latest.index
-                beat_age = time - latest.scheduled_time
-
-            # Older cues can still be fading, so the strongest surviving one
-            # wins. The window is wide enough that anything outside it has
-            # already decayed below IMPULSE_EPSILON.
-            window = self.decay * 8.0
-            for cue in self.timeline.cues_in(time - window, time):
-                age = time - cue.scheduled_time
-                impulse = max(impulse, cue.strength * math.exp(-age / self.decay))
-
-        if impulse < IMPULSE_EPSILON:
-            impulse = 0.0
-
-        sway = math.sin(2.0 * math.pi * time / self.sway_period)
-        return MotionState(
-            time=time,
-            impulse=impulse,
-            sway=sway,
-            beat_index=beat_index,
-            beat_age=beat_age,
-        )
-
-    def apply_at(self, time: float) -> MotionState:
+    def apply_at(self, time: float) -> GrooveState | None:
         """Evaluate the pose for ``time`` and write it to the rig."""
         state = self.state_at(time)
+        if state is None:
+            self.rig.reset()
+            return None
         self._write_pose(state)
         return state
 
     def reset(self) -> None:
-        """Return the rig to its rest pose."""
+        """Neutral stance with no movement on top."""
         self.rig.reset()
 
-    def _write_pose(self, state: MotionState) -> None:
-        hit = state.impulse
+    def pose_offsets(self, state: GrooveState) -> dict[str, tuple[float, float, float]]:
+        """The movement as joint -> (heading, pitch, roll), measured from neutral.
+
+        The neutral stance itself lives in the rig, so these are purely the
+        groove. Separated from writing them so tests and the debug output can
+        look at the numbers without needing a rig.
+        """
+        scale = state.intensity * state.variation.emphasis
+        bounce = state.bounce
+        pulse = state.pulse
         sway = state.sway
+        weight = state.weight_shift
+        breath = state.breath
 
-        # Nod: the head leads, the neck and spine follow with less travel, which
-        # reads as a body movement rather than a detached head.
-        self.rig.set_offset("head", pitch=-NOD_HEAD * hit, roll=SWAY_HEAD * sway)
-        self.rig.set_offset("neck_01", pitch=-NOD_NECK * hit)
-        self.rig.set_offset("spine_03", pitch=-NOD_SPINE * hit, roll=SWAY_SPINE * sway * 0.4)
-        self.rig.set_offset("spine_02", pitch=-NOD_SPINE * 0.5 * hit, roll=SWAY_SPINE * sway * 0.3)
-        self.rig.set_offset("spine_01", roll=SWAY_SPINE * sway * 0.3)
+        # Human movement is not mirror-symmetric; one side always works harder.
+        bias = state.variation.shoulder_bias * ASYMMETRY
+        left = 1.0 + bias
+        right = 1.0 - bias
+        lead = state.variation.lead_side
 
-        # Shoulders bounce on the beat, mirrored left and right.
-        self.rig.set_offset("clavicle_l", pitch=-SHOULDER_DROP * hit)
-        self.rig.set_offset("clavicle_r", pitch=-SHOULDER_DROP * hit)
-        self.rig.set_offset("upperarm_l", pitch=ARM_SWING * hit, roll=ARM_SWING * sway * 0.5)
-        self.rig.set_offset("upperarm_r", pitch=ARM_SWING * hit, roll=-ARM_SWING * sway * 0.5)
+        offsets: dict[str, list[float]] = {}
+
+        def add(joint: str, heading: float = 0.0, pitch: float = 0.0, roll: float = 0.0) -> None:
+            current = offsets.setdefault(joint, [0.0, 0.0, 0.0])
+            current[0] += heading
+            current[1] += pitch
+            current[2] += roll
+
+        # Hips lead the weight shift; the lower spine leans back the other way so
+        # the body stays balanced over the feet instead of toppling sideways.
+        add("pelvis", heading=sway * PELVIS_SWAY_HEADING * scale,
+            roll=weight * PELVIS_WEIGHT_ROLL * scale)
+        add("spine_01", roll=-weight * SPINE1_COUNTER_ROLL * scale)
+
+        add("spine_02", heading=sway * SPINE2_SWAY_HEADING * scale,
+            roll=sway * SPINE2_SWAY_ROLL * scale)
+        add("spine_03", pitch=bounce * SPINE3_BOUNCE_PITCH * scale,
+            roll=sway * SPINE3_SWAY_ROLL * scale)
+
+        add("neck_01", pitch=(bounce * NECK_BOUNCE_PITCH + pulse * NECK_PULSE_PITCH) * scale)
+        add(
+            "head",
+            heading=(state.variation.head_bias * HEAD_BIAS_HEADING
+                     + sway * HEAD_SWAY_HEADING) * scale,
+            pitch=(bounce * HEAD_BOUNCE_PITCH + pulse * HEAD_PULSE_PITCH) * scale
+                  + breath * HEAD_BREATH_PITCH,
+            roll=-sway * HEAD_SWAY_ROLL * scale,
+        )
+
+        shoulder = (bounce * CLAVICLE_BOUNCE + pulse * CLAVICLE_PULSE) * scale
+        add("clavicle_l", pitch=-shoulder * left)
+        add("clavicle_r", pitch=-shoulder * right)
+
+        arm = bounce * UPPERARM_BOUNCE_PITCH * scale
+        add("upperarm_l", pitch=arm * left, roll=sway * UPPERARM_SWAY_ROLL * scale)
+        add("upperarm_r", pitch=arm * right, roll=-sway * UPPERARM_SWAY_ROLL * scale)
+        add("lowerarm_l", pitch=bounce * LOWERARM_BOUNCE_PITCH * scale * left)
+        add("lowerarm_r", pitch=bounce * LOWERARM_BOUNCE_PITCH * scale * right)
+
+        # The leg carrying the weight straightens; the other softens. Subtle on
+        # purpose - the feet are planted, so anything larger reads as sliding.
+        add("thigh_l", roll=weight * THIGH_WEIGHT_ROLL * scale)
+        add("thigh_r", roll=weight * THIGH_WEIGHT_ROLL * scale)
+        knee = bounce * KNEE_BOUNCE_PITCH * scale
+        carry = weight * KNEE_WEIGHT_PITCH * scale * lead
+        add("calf_l", pitch=knee - carry)
+        add("calf_r", pitch=knee + carry)
+
+        return {name: (v[0], v[1], v[2]) for name, v in offsets.items()}
+
+    def _write_pose(self, state: GrooveState) -> None:
+        for name, (heading, pitch, roll) in self.pose_offsets(state).items():
+            self.rig.set_offset(name, heading=heading, pitch=pitch, roll=roll)

@@ -7,11 +7,13 @@ animation code.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
+from ghost_in_the_deck.animation.groove import GrooveEngine
 from ghost_in_the_deck.audio.features import MusicFeatures
 
 SAMPLE_RATE = 22050
@@ -60,11 +62,22 @@ def make_silent_track(path: Path, seconds: float = 2.0, sr: int = SAMPLE_RATE) -
     return path
 
 
-def make_features(beats, duration: float = 12.0, bpm: float = 120.0) -> MusicFeatures:
-    """A MusicFeatures with an exactly known beat timeline."""
+def make_features(
+    beats, duration: float = 12.0, bpm: float = 120.0, energy=None
+) -> MusicFeatures:
+    """A MusicFeatures with an exactly known beat timeline.
+
+    ``energy`` may be a constant or a callable taking the frame time, so a test
+    can shape the loudness curve the groove will read.
+    """
     step = 0.05
     frames = [i * step for i in range(int(duration / step))]
-    ones = [1.0] * len(frames)
+    if energy is None:
+        ones = [1.0] * len(frames)
+    elif callable(energy):
+        ones = [float(energy(t)) for t in frames]
+    else:
+        ones = [float(energy)] * len(frames)
     return MusicFeatures(
         track="synthetic",
         duration_seconds=duration,
@@ -105,3 +118,35 @@ class RecordingRig:
 
     def pose(self) -> dict[str, tuple[float, float, float]]:
         return dict(self.offsets)
+
+
+def groove_for(
+    beats=None,
+    duration: float = 14.0,
+    bpm: float = 120.0,
+    seed: str = "test",
+    energy=None,
+) -> GrooveEngine:
+    """A GrooveEngine over a known beat grid, for tests that need behaviour."""
+    if beats is None:
+        beats = regular_beats(bpm=bpm)
+    return GrooveEngine(
+        make_features(beats, duration=duration, bpm=bpm, energy=energy), seed=seed
+    )
+
+
+@dataclass(frozen=True)
+class SampleState:
+    """Minimal stand-in for the pose state TimingRecorder reads.
+
+    The recorder only looks at four attributes; building a whole GrooveState in
+    a coverage test would obscure what is being tested.
+    """
+
+    time: float
+    beat_index: int
+    beat_age: float
+
+    @property
+    def has_beat(self) -> bool:
+        return self.beat_index >= 0

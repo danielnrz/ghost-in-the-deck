@@ -4,7 +4,8 @@
     python -m ghost_in_the_deck.app --track minel
     python -m ghost_in_the_deck.app --no-audio --seconds 20   # silent smoke run
 
-The chain is analysis -> MusicFeatures -> BeatTimeline -> AvatarAnimator -> AvatarRig.
+The chain is analysis -> MusicFeatures -> BeatTimeline + EnergyTrack ->
+GrooveEngine -> AvatarAnimator -> AvatarRig.
 This module only wires those together and owns the Panda3D scene.
 
 The playback clock is the authority for musical progress. Each frame asks the
@@ -23,6 +24,7 @@ from panda3d.core import loadPrcFileData
 
 from .animation.controller import AvatarAnimator
 from .animation.cues import BeatTimeline
+from .animation.groove import GrooveEngine
 from .animation.rig import AvatarRig
 from .audio.analysis import analyse
 from .audio.decode import to_wav
@@ -70,7 +72,8 @@ class GhostApp:
         self.rig = AvatarRig(AVATAR, parent=self.base.render)
         self._frame_avatar()
         self.timeline = BeatTimeline(self.features)
-        self.animator = AvatarAnimator(self.rig, self.timeline)
+        self.groove = GrooveEngine(self.features, self.timeline)
+        self.animator = AvatarAnimator(self.rig, self.groove)
         self.recorder = TimingRecorder(
             beat_times=self.features.beats,
             response_window=self.animator.response_window,
@@ -82,6 +85,7 @@ class GhostApp:
         self.clock = PlaybackClock(sound)
 
         self._next_stall_at = args.stall_every if args.stall_every else None
+        self._samples = 0
         self.base.taskMgr.add(self._update, "ghost-update")
 
     # ------------------------------------------------------------------ scene
@@ -151,6 +155,17 @@ class GhostApp:
         if response is not None and self.args.verbose:
             print(response.format(), flush=True)
 
+        if self.args.debug_motion and self._samples % self.args.debug_every == 0:
+            print(
+                f"t={state.time:7.2f}  beat={state.beat_index:<5d} "
+                f"phase={state.beat_phase:4.2f} bar={state.bar_phase:4.2f}  "
+                f"energy={state.energy:4.2f} intensity={state.intensity:4.2f}  "
+                f"pulse={state.pulse:4.2f} bounce={state.bounce:4.2f} "
+                f"sway={state.sway:+5.2f} weight={state.weight_shift:+5.2f}",
+                flush=True,
+            )
+        self._samples += 1
+
         if self.args.seconds and now >= self.args.seconds:
             return self._finish()
         if now >= self.features.duration_seconds:
@@ -189,6 +204,18 @@ def main() -> None:
     parser.add_argument("--no-audio", action="store_true", help="run without playback")
     parser.add_argument("--refresh", action="store_true", help="re-run analysis")
     parser.add_argument("--verbose", action="store_true", help="log every beat")
+    parser.add_argument(
+        "--debug-motion",
+        action="store_true",
+        help="print beat phase, energy and groove values while playing",
+    )
+    parser.add_argument(
+        "--debug-every",
+        type=int,
+        default=30,
+        metavar="N",
+        help="print one debug line every N update samples (default 30)",
+    )
     parser.add_argument(
         "--simulate-stall",
         type=float,

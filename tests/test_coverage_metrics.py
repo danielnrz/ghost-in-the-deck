@@ -11,21 +11,22 @@ from __future__ import annotations
 
 import unittest
 
-from ghost_in_the_deck.animation.controller import MotionState
 from ghost_in_the_deck.sync import TimingRecorder
+
+from synthetic import SampleState
 
 WINDOW = 0.48
 BEATS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
 
 
-def state_at(time: float, beats=BEATS) -> MotionState:
-    """The MotionState a real animator would produce at ``time``."""
+def state_at(time: float, beats=BEATS) -> SampleState:
+    """The pose state a real animator would produce at ``time``."""
     index = -1
     age = float("inf")
     for i, beat in enumerate(beats):
         if beat <= time:
             index, age = i, time - beat
-    return MotionState(time=time, impulse=0.0, sway=0.0, beat_index=index, beat_age=age)
+    return SampleState(time=time, beat_index=index, beat_age=age)
 
 
 def play(samples, beats=BEATS, window=WINDOW) -> TimingRecorder:

@@ -109,7 +109,7 @@ class TimingRecorder:
     ) -> BeatResponse | None:
         """Log one update sample.
 
-        ``state`` is the MotionState just written, ``observed_at`` is the
+        ``state`` is the pose state just written, ``observed_at`` is the
         playback time read once the update had finished, and ``wall_time`` is a
         wall-clock reading taken at the same moment as the playback time the
         pose was evaluated for.
