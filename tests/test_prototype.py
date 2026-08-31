@@ -11,7 +11,8 @@ from ghost_in_the_deck.animation.cues import BeatTimeline
 from ghost_in_the_deck.sync import TimingRecorder
 
 import panda_env
-from synthetic import make_features, regular_beats
+from ghost_in_the_deck.animation.rig import AvatarRig
+from synthetic import SampleState, groove_for, make_features, regular_beats
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets" / "avatar"
 BAM = ASSETS / "ghost_test.bam"
@@ -54,11 +55,7 @@ class TestTimingRecorder(unittest.TestCase):
     """Per-sample bookkeeping. Coverage accounting lives in test_coverage_metrics."""
 
     def _state(self, time, beat_index, beat_age):
-        from ghost_in_the_deck.animation.controller import MotionState
-
-        return MotionState(
-            time=time, impulse=0.5, sway=0.0, beat_index=beat_index, beat_age=beat_age
-        )
+        return SampleState(time=time, beat_index=beat_index, beat_age=beat_age)
 
     def test_first_sample_carrying_a_beat_records_its_latency(self):
         recorder = TimingRecorder(beat_times=[1.0], response_window=0.48)
@@ -113,7 +110,6 @@ class TestVisibleMovement(unittest.TestCase):
             raise unittest.SkipTest("no display available for offscreen rendering")
 
         from ghost_in_the_deck.animation.controller import AvatarAnimator
-        from ghost_in_the_deck.animation.rig import AvatarRig
         from panda3d.core import AmbientLight, DirectionalLight, Vec4
 
         cls.base = panda_env.get_base()
@@ -131,12 +127,8 @@ class TestVisibleMovement(unittest.TestCase):
         cls.base.render.setLight(cls.base.render.attachNewNode(ambient))
 
         cls.rig = AvatarRig(BAM, parent=cls.base.render)
-        # One beat at t=1.0. Sway is disabled so the pixel comparisons isolate
-        # the beat movement.
-        cls.timeline = BeatTimeline(make_features([1.0], duration=4.0))
-        cls.animator = AvatarAnimator(
-            cls.rig, cls.timeline, sway_period=1.0e9
-        )
+        cls.groove = groove_for(beats=[1.0], duration=4.0, seed="prototype")
+        cls.animator = AvatarAnimator(cls.rig, cls.groove)
 
     def test_avatar_is_actually_drawn(self):
         self.animator.apply_at(0.0)
@@ -154,15 +146,80 @@ class TestVisibleMovement(unittest.TestCase):
         ratio = float((changed > 12).mean())
         self.assertGreater(ratio, 0.005, f"only {ratio:.4%} of pixels changed on a beat")
 
-    def test_pose_returns_between_beats(self):
-        self.animator.apply_at(0.5)
-        rest = panda_env.render_screenshot().astype(np.int16)
+    def test_pose_stays_within_bounded_travel(self):
+        """The body keeps moving, but never wanders far from neutral."""
+        self.animator.reset()
+        neutral = panda_env.render_screenshot().astype(np.int16)
 
-        self.animator.apply_at(2.5)               # well past the decay
-        settled = panda_env.render_screenshot().astype(np.int16)
+        worst = 0.0
+        for step in range(40):
+            self.animator.apply_at(step * 0.1)
+            frame = panda_env.render_screenshot().astype(np.int16)
+            moved = float((np.abs(frame - neutral).max(axis=2) > 12).mean())
+            worst = max(worst, moved)
+        self.assertLess(worst, 0.25, "pose drifted far from the neutral stance")
 
-        changed = float((np.abs(settled - rest).max(axis=2) > 12).mean())
-        self.assertLess(changed, 0.01, "avatar did not return to rest after a beat")
+    def test_neutral_stance_is_not_the_assets_a_pose(self):
+        """The avatar no longer stands with its arms out at 45 degrees."""
+        self.animator.reset()
+        stance = panda_env.render_screenshot().astype(np.int16)
+
+        # Undo the neutral correction to recover the asset's own rest pose.
+        for joint, (heading, pitch, roll) in AvatarRig.NEUTRAL_POSE.items():
+            rest_h, rest_p, rest_r = self.rig._rest[joint]
+            self.rig._joints[joint].setHpr(
+                rest_h - heading, rest_p - pitch, rest_r - roll
+            )
+        self.rig.force_update()
+        a_pose = panda_env.render_screenshot().astype(np.int16)
+
+        changed = float((np.abs(stance - a_pose).max(axis=2) > 12).mean())
+        self.assertGreater(changed, 0.02, f"stance barely differs from A-pose ({changed:.3%})")
+        self.animator.reset()
+
+    def test_groove_moves_the_body_between_beats(self):
+        """Movement continues where no beat accent is firing."""
+        self.groove.pulse_decay = 0.02
+        self.groove.pulse_attack = 0.005
+        quiet = [2.30, 2.42, 2.54]
+        for time in quiet:
+            self.assertEqual(self.animator.state_at(time).pulse, 0.0)
+
+        frames = []
+        for time in quiet:
+            self.animator.apply_at(time)
+            frames.append(panda_env.render_screenshot().astype(np.int16))
+
+        for earlier, later in zip(frames, frames[1:]):
+            changed = float((np.abs(later - earlier).max(axis=2) > 12).mean())
+            self.assertGreater(changed, 0.001, "no visible movement between beats")
+
+    def test_louder_music_produces_larger_movement_on_screen(self):
+        from ghost_in_the_deck.animation.controller import AvatarAnimator
+        from synthetic import groove_for
+
+        self.animator.reset()
+        neutral = panda_env.render_screenshot().astype(np.int16)
+
+        def travel(energy):
+            animator = AvatarAnimator(
+                self.rig,
+                groove_for(beats=regular_beats(bpm=120.0, count=40), duration=20.0,
+                           seed="energy", energy=energy),
+            )
+            worst = 0.0
+            for step in range(24):
+                animator.apply_at(4.0 + step * 0.05)
+                frame = panda_env.render_screenshot().astype(np.int16)
+                worst = max(worst, float((np.abs(frame - neutral).max(axis=2) > 12).mean()))
+            return worst
+
+        ramp = lambda t: t / 20.0
+        quiet = travel(lambda t: max(0.02, ramp(t) * 0.05))
+        self.animator.reset()
+        loud = travel(lambda t: min(1.0, 0.6 + ramp(t)))
+        self.assertGreater(loud, quiet, f"loud {loud:.4f} did not exceed quiet {quiet:.4f}")
+        self.animator.reset()
 
     def test_rendered_pose_does_not_depend_on_frame_history(self):
         """The schedule-independence invariant, on the real rig and real pixels."""

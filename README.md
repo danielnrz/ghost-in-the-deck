@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 0**.
+This repository is currently at **Phase 1A**.
 
 ## Phase 0 scope
 
@@ -28,17 +28,68 @@ Audio Analyzer      audio/analysis.py    librosa, offline, before playback
       |
 MusicFeatures       audio/features.py    plain data - no librosa, no Panda3D
       |
-(DJ Behaviour)      animation/cues.py    reserved seam; today one cue per beat
+      +--> BeatTimeline    animation/cues.py     beats and beat phase
+      +--> EnergyTrack     animation/energy.py   smoothed intensity
       |
-Animation Ctrl      animation/controller.py
+GrooveEngine        animation/groove.py  what the body is doing at time T
+      |
+GrooveState                              beat phase, energy, sway, weight...
+      |
+Animation Ctrl      animation/controller.py   groove -> joint angles
       |
 3D Avatar           animation/rig.py     the only module that touches bones
 ```
 
-The layers are kept apart so a real behaviour engine can be dropped in between
-`MusicFeatures` and the animation controller later without rewriting either end.
+`GrooveEngine` is the seam the DJ behaviour engine will grow into. It already
+answers "what is the body doing right now"; later it will also answer "and what
+is the DJ reaching for".
 
-## Timing model
+## Body language (Phase 1A)
+
+The avatar stands in a neutral DJ stance rather than the asset's A-pose, and
+moves continuously rather than twitching once per beat.
+
+Several rates run at once, because a body moving at a single frequency reads as
+a machine:
+
+| Layer | Rate | Drives |
+|---|---|---|
+| breath | ~7 s | never completely still |
+| weight shift | 2 bars | hips, spine counter-lean, knees |
+| sway | 1 bar | torso rotation and lean, head |
+| bounce | 1 beat | continuous rise and fall through the whole body |
+| accent | on the beat | the sharp nod, with a short attack so it does not snap |
+
+Movement scale follows a smoothed energy signal built from RMS, bass and onset
+activity, rescaled against **the track's own** dynamic range so a quiet recording
+still reaches full intensity in its loudest passage. Movement never stops
+entirely: quiet passages are restrained, not frozen.
+
+Variation is deterministic. Per-bar character - emphasis, head bias, which
+shoulder works harder, which leg takes the weight - comes from a crc32 of the
+track name and bar number, eased across the bar so nothing snaps at the bar line.
+`hash()` is deliberately not used: Python randomises string hashing per process,
+which would give a different dance every run. The same track always moves the
+same way at the same moment.
+
+### The neutral stance
+
+Applied at runtime, in `AvatarRig.NEUTRAL_POSE`, rather than baked into the GLB.
+
+That choice was deliberate. The stance and the movement then share one coordinate
+convention and one iteration loop, it composes additively with the DJ gestures
+that come next, and the exported mesh and its bind weights stay untouched. The
+angles were found by rendering candidates rather than by geometry alone: the
+values a solver picks for a perfectly vertical arm are large enough that the
+linear-blend skin splays the shoulder into a wing.
+
+The trade-off: the GLB on disk is still an A-pose asset, so an external viewer
+shows an A-pose. Nothing in this project reads it that way.
+
+Joint limits in `AvatarRig.LIMITS` bound how far each joint may move *from* the
+neutral stance, and are enforced in the rig so nothing upstream can exceed them.
+
+## Timing model## Timing model
 
 The playback clock is the authority for musical progress, not the renderer.
 
@@ -133,8 +184,18 @@ PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app --verbose        # log 
 Analysis is cached per track, so only the first run pays for it. Timing results
 are written to `out/sync_report.json`.
 
+Watch the numbers behind the movement:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app --seconds 60 --debug-motion
+```
+
+prints playback time, beat index, beat phase, bar phase, energy, intensity and
+the individual groove layers.
+
 Useful flags: `--headless` (render offscreen), `--no-audio` (silent run),
-`--refresh` (re-analyse), `--seconds N` (stop early).
+`--refresh` (re-analyse), `--seconds N` (stop early),
+`--debug-every N` (debug print frequency).
 
 To watch stall recovery directly, freeze the update loop on purpose:
 
@@ -189,10 +250,13 @@ Two format notes, both learned the hard way:
 
 ## Known limitations
 
-- The avatar's rest pose is MPFB's A-pose, so the arms sit away from the body.
-  It is not posed for standing at a DJ booth.
-- No DJ behaviour exists. Every beat produces the same movement, scaled only by
-  the track's bass and onset energy.
+- No DJ behaviour exists yet. The avatar grooves to the music but does not do
+  anything a DJ does: no booth, no controls, no gestures.
+- Bars are assumed to be four beats. A track in another metre still grooves, but
+  the slow layers land on the wrong subdivision.
+- Leg movement is deliberately small. The feet are planted and there is no IK, so
+  anything larger reads as sliding.
+- The neutral stance is a runtime correction; the exported GLB is still A-pose.
 - Beat detection is whole-track and fixed-tempo. Tracks that change tempo, and
   the quieter intros of some tracks, will drift.
 - Analysis runs before playback. There is no live or microphone input.
