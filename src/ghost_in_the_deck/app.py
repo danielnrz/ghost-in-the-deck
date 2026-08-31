@@ -28,6 +28,7 @@ from .audio.analysis import analyse
 from .audio.decode import to_wav
 from .audio.features import MusicFeatures
 from .audio.library import DEFAULT_MUSIC_DIR, choose_track
+from .clock import PlaybackClock
 from .sync import TimingRecorder
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,38 +45,6 @@ def load_features(track: Path, refresh: bool = False) -> MusicFeatures:
     features = analyse(track)
     features.save(cached)
     return features
-
-
-class PlaybackClock:
-    """Current position in the track, and the authority on musical time.
-
-    Panda3D's OpenAL sound reports its own play position, which is the honest
-    reference for synchronisation. Without audio the wall clock stands in so the
-    prototype can still be exercised headlessly.
-
-    The reading never goes backwards. A sound that stops or is re-buffered can
-    briefly report an earlier position, and letting that through would make the
-    avatar jump back to an earlier part of the music.
-    """
-
-    def __init__(self, sound=None):
-        self.sound = sound
-        self._start = time.perf_counter()
-        self._latest = 0.0
-
-    def start(self) -> None:
-        self._start = time.perf_counter()
-        self._latest = 0.0
-        if self.sound is not None:
-            self.sound.play()
-
-    def time(self) -> float:
-        if self.sound is not None and self.sound.status() == self.sound.PLAYING:
-            reading = self.sound.getTime()
-        else:
-            reading = time.perf_counter() - self._start
-        self._latest = max(self._latest, reading)
-        return self._latest
 
 
 def build_app(args) -> "GhostApp":

@@ -38,6 +38,38 @@ Animation Ctrl      animation/controller.py
 The layers are kept apart so a real behaviour engine can be dropped in between
 `MusicFeatures` and the animation controller later without rewriting either end.
 
+## Timing model
+
+The playback clock is the authority for musical progress, not the renderer.
+
+The pose is a **pure function of playback time**. `BeatTimeline` answers what the
+music is doing at a time by binary search and keeps no playback position;
+`AvatarAnimator.state_at(t)` derives the nod from the age of the surrounding cues
+and the sway from `t` directly. Nothing is integrated across frames, so the
+sequence of frames drawn before a moment cannot change the pose produced at it.
+
+The practical consequence: if rendering stalls, frames are missed - that is
+unavoidable - but the next frame drawn is correct for the moment it is drawn.
+There is no catching up, no replayed backlog and no accumulated drift.
+
+`clock.py` matters more than its size suggests. Panda3D refreshes a sound's
+reported position from a task, so while the main loop is blocked `getTime()` does
+not move even though the sound card keeps playing. Reading it directly would
+freeze musical time for exactly as long as the renderer stalls. The clock instead
+uses each reading as an anchor and carries time forward on the wall clock between
+refreshes, re-anchoring whenever the sound reports a new position.
+
+## What the timing numbers mean
+
+A run prints two independent things, and they must not be confused.
+
+| Metric | Meaning |
+|---|---|
+| **State lag** | Playback time elapsed during the update minus the time the pose was evaluated for. Near zero by construction. A large value would mean the musical state had fallen behind - the thing the architecture exists to prevent. |
+| **Beats never rendered** | Beats that no frame displayed because rendering stalled through them. A display limitation, not a timing error. Honest by design: a one second freeze physically cannot show the beats inside it. |
+| **Beat response latency** | For beats that *were* displayed, how long before the first frame showing them. Roughly one frame interval when rendering is healthy. |
+| **Frame interval / update cost** | Total time between frames, and the share of it spent in this project's own code. The gap between them is where a stall actually lives. |
+
 ## Requirements
 
 - Python 3.12
@@ -81,17 +113,37 @@ are written to `out/sync_report.json`.
 Useful flags: `--headless` (render offscreen), `--no-audio` (silent run),
 `--refresh` (re-analyse), `--seconds N` (stop early).
 
+To watch stall recovery directly, freeze the update loop on purpose:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app \
+    --seconds 30 --simulate-stall 1.0 --stall-every 3.0
+```
+
+Beats inside each freeze are reported as never rendered, while state lag stays
+near zero - the display misses frames, the music does not drift.
+
 ## Tests
 
 ```bash
 PYTHONPATH=src:tests .venv/bin/python -m unittest discover -s tests
 ```
 
-They cover real audio analysis (including a synthetic click track of known
-tempo), the exported avatar's mesh and skeleton, cue scheduling, timing
-statistics, and a pixel comparison of rendered frames proving the movement is
-actually visible. Tests needing a display skip without one; under a headless
-shell use `xvfb-run -a`.
+The suite needs **no music of your own**. Audio correctness is checked against a
+generated track carrying real kick, body and tick energy, so a fresh clone with
+an empty `testMusic/` gets a full result. The checks against your own library are
+an optional extra and skip when there is nothing there.
+
+Coverage: audio analysis, the exported avatar's mesh and skeleton, timeline
+lookup, the playback clock, timing statistics, and a pixel comparison of rendered
+frames proving the movement is actually visible.
+
+`test_timing.py` is the render-stall suite. It drives the real timeline and
+animator through 60/30/15/5 fps schedules and through 250 ms, 500 ms and 1 s
+stalls, asserting the pose at a playback time is identical however many frames
+preceded it.
+
+Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
 ## Regenerating the avatar
 
@@ -123,7 +175,10 @@ Two format notes, both learned the hard way:
 - Analysis runs before playback. There is no live or microphone input.
 - Timing is measured against Panda3D's playback clock. It does not include sound
   card output latency, which would need an external recording to measure.
-- Movement quality is tied to frame rate: the beat handling runs in the render
-  loop, so a throttled or slow display degrades synchronisation.
+- Poses are evaluated on the render thread, so a stalled renderer still means
+  missed frames. The music does not drift, but nothing is drawn during a freeze.
+- Frame delivery on a Wayland compositor varies with display state. The same
+  build has been measured at both 166 fps and under 2 fps on this machine
+  depending on whether the surface was actually being composited.
 - The exported skin is a plain solid material. MPFB's detailed skins need asset
   packs that are not part of the add-on.
