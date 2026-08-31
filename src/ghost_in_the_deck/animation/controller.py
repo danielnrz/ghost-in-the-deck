@@ -1,16 +1,21 @@
-"""Drives the rig from motion cues.
+"""Drives the rig from the motion timeline.
 
-The controller keeps a small amount of state (a decaying impulse plus a slow
-sway phase) and writes joint offsets every frame. It knows nothing about beats
-or audio; it only consumes MotionCue objects.
+The pose is a pure function of absolute playback time. Nothing is integrated
+across frames, so the sequence of render frames leading up to time T cannot
+change the pose produced at T. A renderer that stalls for a second simply misses
+frames; when it comes back it draws the pose the music calls for *now*, with no
+catching up and no accumulated drift.
+
+This module knows nothing about beats, audio files or Panda3D windows; it reads
+cues from a BeatTimeline and writes joint offsets to an AvatarRig.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
-from .cues import MotionCue
-from .rig import AvatarRig
+from .cues import BeatTimeline
 
 # Peak rotation in degrees at full cue strength.
 NOD_HEAD = 13.0
@@ -21,49 +26,95 @@ ARM_SWING = 5.0
 SWAY_SPINE = 3.5
 SWAY_HEAD = 2.0
 
+# Below this the impulse is treated as finished, so a pose that has decayed to
+# nothing compares exactly equal to the rest pose.
+IMPULSE_EPSILON = 1e-3
 
-class AvatarAnimator:
-    """Turns cues into visible skeletal movement."""
 
-    def __init__(self, rig: AvatarRig, decay: float = 0.16, sway_period: float = 2.0):
-        self.rig = rig
-        self.decay = decay          # seconds for the impulse to fall to ~37%
-        self.sway_period = sway_period
-        self._impulse = 0.0
-        self._sway_phase = 0.0
+@dataclass(frozen=True)
+class MotionState:
+    """The avatar's movement evaluated at one absolute playback time."""
 
-    def reset(self) -> None:
-        """Return to the rest pose and forget any movement in flight."""
-        self._impulse = 0.0
-        self._sway_phase = 0.0
-        self.rig.reset()
-
-    def apply_cue(self, cue: MotionCue) -> None:
-        """Start a new movement. Re-triggering takes the stronger of the two so
-        a fast beat cannot make the avatar stutter mid-nod."""
-        self._impulse = max(self._impulse, cue.strength)
-
-    def update(self, dt: float) -> None:
-        if dt > 0.25:  # after a hitch, do not integrate a huge step
-            dt = 0.25
-
-        self._impulse *= math.exp(-dt / self.decay)
-        if self._impulse < 1e-3:
-            self._impulse = 0.0
-
-        self._sway_phase += dt * (2.0 * math.pi / self.sway_period)
-        if self._sway_phase > 2.0 * math.pi:
-            self._sway_phase -= 2.0 * math.pi
-
-        self._write_pose()
+    time: float
+    impulse: float
+    sway: float
+    beat_index: int      # -1 before the first cue
+    beat_age: float      # seconds since that cue; inf when there is none
 
     @property
-    def impulse(self) -> float:
-        return self._impulse
+    def has_beat(self) -> bool:
+        return self.beat_index >= 0
 
-    def _write_pose(self) -> None:
-        hit = self._impulse
-        sway = math.sin(self._sway_phase)
+
+class AvatarAnimator:
+    """Evaluates the pose for a playback time and writes it to the rig."""
+
+    def __init__(
+        self,
+        rig,
+        timeline: BeatTimeline | None = None,
+        decay: float = 0.16,
+        sway_period: float = 2.0,
+    ):
+        self.rig = rig
+        self.timeline = timeline
+        self.decay = decay          # seconds for the impulse to fall to ~37%
+        self.sway_period = sway_period
+
+    @property
+    def visible_for(self) -> float:
+        """How long a cue's response stays visible.
+
+        Three decay constants leaves about 5% of the movement, which is the
+        point past which a frame would show nothing worth calling a response.
+        """
+        return self.decay * 3.0
+
+    def state_at(self, time: float) -> MotionState:
+        """The pose at ``time``, derived only from ``time`` and the timeline."""
+        impulse = 0.0
+        beat_index = -1
+        beat_age = math.inf
+
+        if self.timeline is not None:
+            latest = self.timeline.cue_before(time)
+            if latest is not None:
+                beat_index = latest.index
+                beat_age = time - latest.scheduled_time
+
+            # Older cues can still be fading, so the strongest surviving one
+            # wins. The window is wide enough that anything outside it has
+            # already decayed below IMPULSE_EPSILON.
+            window = self.decay * 8.0
+            for cue in self.timeline.cues_in(time - window, time):
+                age = time - cue.scheduled_time
+                impulse = max(impulse, cue.strength * math.exp(-age / self.decay))
+
+        if impulse < IMPULSE_EPSILON:
+            impulse = 0.0
+
+        sway = math.sin(2.0 * math.pi * time / self.sway_period)
+        return MotionState(
+            time=time,
+            impulse=impulse,
+            sway=sway,
+            beat_index=beat_index,
+            beat_age=beat_age,
+        )
+
+    def apply_at(self, time: float) -> MotionState:
+        """Evaluate the pose for ``time`` and write it to the rig."""
+        state = self.state_at(time)
+        self._write_pose(state)
+        return state
+
+    def reset(self) -> None:
+        """Return the rig to its rest pose."""
+        self.rig.reset()
+
+    def _write_pose(self, state: MotionState) -> None:
+        hit = state.impulse
+        sway = state.sway
 
         # Nod: the head leads, the neck and spine follow with less travel, which
         # reads as a body movement rather than a detached head.

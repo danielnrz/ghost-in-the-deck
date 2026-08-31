@@ -4,8 +4,13 @@
     python -m ghost_in_the_deck.app --track minel
     python -m ghost_in_the_deck.app --no-audio --seconds 20   # silent smoke run
 
-The chain is analysis -> MusicFeatures -> MotionCue -> AvatarAnimator -> AvatarRig.
+The chain is analysis -> MusicFeatures -> BeatTimeline -> AvatarAnimator -> AvatarRig.
 This module only wires those together and owns the Panda3D scene.
+
+The playback clock is the authority for musical progress. Each frame asks the
+clock what time it is and draws the pose for that time; nothing is carried over
+between frames. If the renderer stalls, frames are missed but the next one drawn
+is correct for the moment it is drawn.
 """
 
 from __future__ import annotations
@@ -17,13 +22,13 @@ from pathlib import Path
 from panda3d.core import loadPrcFileData
 
 from .animation.controller import AvatarAnimator
-from .animation.cues import BeatCueSource
+from .animation.cues import BeatTimeline
 from .animation.rig import AvatarRig
 from .audio.analysis import analyse
 from .audio.decode import to_wav
 from .audio.features import MusicFeatures
 from .audio.library import DEFAULT_MUSIC_DIR, choose_track
-from .sync import SyncRecorder
+from .sync import TimingRecorder
 
 ROOT = Path(__file__).resolve().parents[2]
 AVATAR = ROOT / "assets" / "avatar" / "ghost_test.bam"
@@ -42,29 +47,35 @@ def load_features(track: Path, refresh: bool = False) -> MusicFeatures:
 
 
 class PlaybackClock:
-    """Current position in the track.
+    """Current position in the track, and the authority on musical time.
 
     Panda3D's OpenAL sound reports its own play position, which is the honest
     reference for synchronisation. Without audio the wall clock stands in so the
     prototype can still be exercised headlessly.
+
+    The reading never goes backwards. A sound that stops or is re-buffered can
+    briefly report an earlier position, and letting that through would make the
+    avatar jump back to an earlier part of the music.
     """
 
     def __init__(self, sound=None):
         self.sound = sound
         self._start = time.perf_counter()
+        self._latest = 0.0
 
     def start(self) -> None:
         self._start = time.perf_counter()
+        self._latest = 0.0
         if self.sound is not None:
             self.sound.play()
 
     def time(self) -> float:
         if self.sound is not None and self.sound.status() == self.sound.PLAYING:
-            return self.sound.getTime()
-        return time.perf_counter() - self._start
-
-    def finished(self, duration: float) -> bool:
-        return self.time() >= duration
+            reading = self.sound.getTime()
+        else:
+            reading = time.perf_counter() - self._start
+        self._latest = max(self._latest, reading)
+        return self._latest
 
 
 def build_app(args) -> "GhostApp":
@@ -89,19 +100,18 @@ class GhostApp:
         self._setup_scene()
         self.rig = AvatarRig(AVATAR, parent=self.base.render)
         self._frame_avatar()
-        self.animator = AvatarAnimator(self.rig)
-        self.cues = BeatCueSource(self.features)
-        self.recorder = SyncRecorder()
+        self.timeline = BeatTimeline(self.features)
+        self.animator = AvatarAnimator(self.rig, self.timeline)
+        self.recorder = TimingRecorder(visible_for=self.animator.visible_for)
 
         sound = None
         if not args.no_audio:
             sound = self.base.loader.loadSfx(str(to_wav(self.track)))
         self.clock = PlaybackClock(sound)
 
-        self._frames = 0
-        self._last = 0.0
-        self._worst_frame = 0.0
-        self._dropped = 0
+        self._previous_audio: float | None = None
+        self._previous_wall: float | None = None
+        self._next_stall_at = args.stall_every if args.stall_every else None
         self.base.taskMgr.add(self._update, "ghost-update")
 
     # ------------------------------------------------------------------ scene
@@ -146,28 +156,39 @@ class GhostApp:
 
     # ------------------------------------------------------------------ frame
     def _update(self, task):
+        entered = time.perf_counter()
         now = self.clock.time()
-        dt = max(0.0, now - self._last)
-        self._last = now
-        self._frames += 1
-        if self._frames > 1:
-            self._worst_frame = max(self._worst_frame, dt)
 
-        before = self.cues.pending
-        cues = self.cues.poll(now)
-        self._dropped += (before - self.cues.pending) - len(cues)
+        # Deliberately freeze the update to show that a stalled renderer does not
+        # leave the musical state behind. Off unless asked for.
+        if self._next_stall_at is not None and now >= self._next_stall_at:
+            time.sleep(self.args.simulate_stall)
+            self._next_stall_at = now + self.args.stall_every
+            now = self.clock.time()
 
-        for cue in cues:
-            self.animator.apply_cue(cue)
-            timing = self.recorder.record(cue.index, cue.scheduled_time, now)
-            if self.args.verbose:
-                print(timing.format(), flush=True)
+        audio_interval = None if self._previous_audio is None else now - self._previous_audio
+        wall_interval = None if self._previous_wall is None else entered - self._previous_wall
+        self._previous_audio = now
+        self._previous_wall = entered
 
-        self.animator.update(dt)
+        state = self.animator.apply_at(now)
+        update_seconds = time.perf_counter() - entered
+
+        response = self.recorder.record_frame(
+            state,
+            observed_at=self.clock.time(),
+            frame_interval=audio_interval,
+            update_seconds=update_seconds,
+            wall_interval=wall_interval,
+        )
+        if response is not None and self.args.verbose:
+            print(response.format(), flush=True)
 
         if self.args.seconds and now >= self.args.seconds:
             return self._finish()
-        if now >= self.features.duration_seconds or self.cues.pending == 0:
+        if now >= self.features.duration_seconds:
+            return self._finish()
+        if now > self.timeline.end_time + self.animator.visible_for:
             return self._finish()
         return task.cont
 
@@ -179,18 +200,7 @@ class GhostApp:
         return Task.done
 
     # ------------------------------------------------------------------- run
-    def frame_stats(self) -> dict:
-        elapsed = max(self._last, 1e-6)
-        return {
-            "frames": self._frames,
-            "average_fps": round(self._frames / elapsed, 1),
-            "worst_frame_ms": round(self._worst_frame * 1000.0, 1),
-            "dropped_beats": self._dropped,
-        }
-
-    def run(self) -> SyncRecorder:
-        self.cues.reset(0.0)
-        self._last = 0.0
+    def run(self) -> TimingRecorder:
         self.clock.start()
         try:
             self.base.run()
@@ -208,23 +218,34 @@ def main() -> None:
     parser.add_argument("--no-audio", action="store_true", help="run without playback")
     parser.add_argument("--refresh", action="store_true", help="re-run analysis")
     parser.add_argument("--verbose", action="store_true", help="log every beat")
+    parser.add_argument(
+        "--simulate-stall",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="freeze the update loop periodically, to exercise stall recovery",
+    )
+    parser.add_argument(
+        "--stall-every",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="playback interval between simulated stalls",
+    )
     parser.add_argument("--report", default=str(REPORT_DIR / "sync_report.json"))
     args = parser.parse_args()
+
+    if args.simulate_stall and not args.stall_every:
+        parser.error("--simulate-stall needs --stall-every")
 
     app = build_app(args)
     print(f"track : {app.track.name}")
     print(f"bpm   : {app.features.bpm:.2f}   beats: {len(app.features.beats)}")
     recorder = app.run()
 
-    stats = app.frame_stats()
     print()
-    print(
-        f"Frames rendered      : {stats['frames']}  "
-        f"({stats['average_fps']} fps, worst frame {stats['worst_frame_ms']} ms)"
-    )
-    print(f"Beats dropped as late: {stats['dropped_beats']}")
     print(recorder.format_summary())
-    if recorder.timings:
+    if recorder.responses:
         path = recorder.save(args.report, track=app.track.name)
         print(f"\nreport: {path}")
 

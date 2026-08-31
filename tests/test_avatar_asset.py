@@ -126,21 +126,20 @@ class TestBamRuntimeAsset(unittest.TestCase):
         self.rig.force_update()
         self.assertAlmostEqual((head.getPos(self.base.render) - rest).length(), 0.0, places=4)
 
-    def test_animator_drives_the_rig_from_a_cue(self):
-        """A cue must produce movement, and the pose must settle back."""
+    def test_animator_drives_the_rig_from_the_timeline(self):
+        """A beat must produce movement, and the pose must settle back."""
         from ghost_in_the_deck.animation.controller import AvatarAnimator
-        from ghost_in_the_deck.animation.cues import MotionCue
+        from ghost_in_the_deck.animation.cues import BeatTimeline
+        from synthetic import make_features
 
-        self.rig.reset()
-        animator = AvatarAnimator(self.rig)
-        animator.apply_cue(MotionCue(kind="beat", scheduled_time=0.0, strength=1.0, index=0))
-        animator.update(1 / 60)
+        timeline = BeatTimeline(make_features([1.0], duration=4.0))
+        animator = AvatarAnimator(self.rig, timeline)
+
+        animator.apply_at(1.01)
         self.assertLess(self.rig.offset_of("head")[1], -1.0, "head did not nod")
 
-        for _ in range(120):  # two seconds
-            animator.update(1 / 60)
-        self.assertAlmostEqual(animator.impulse, 0.0, places=3)
-        self.assertAlmostEqual(self.rig.offset_of("head")[1], 0.0, places=2)
+        animator.apply_at(3.0)   # two seconds later, well past the decay
+        self.assertAlmostEqual(animator.state_at(3.0).impulse, 0.0, places=6)
         self.rig.reset()
 
 

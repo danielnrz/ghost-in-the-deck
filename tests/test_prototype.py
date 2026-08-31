@@ -1,4 +1,4 @@
-"""Cue generation, timing measurement, and proof that movement is visible."""
+"""Timeline construction, timing reports, and proof that movement is visible."""
 
 from __future__ import annotations
 
@@ -7,68 +7,94 @@ from pathlib import Path
 
 import numpy as np
 
-from ghost_in_the_deck.animation.cues import BeatCueSource, MotionCue
-from ghost_in_the_deck.audio.features import MusicFeatures
-from ghost_in_the_deck.sync import SyncRecorder
+from ghost_in_the_deck.animation.cues import BeatTimeline
+from ghost_in_the_deck.sync import TimingRecorder
 
 import panda_env
+from synthetic import make_features, regular_beats
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets" / "avatar"
 BAM = ASSETS / "ghost_test.bam"
 
 
-def make_features(beats, duration=10.0) -> MusicFeatures:
-    frames = [i * 0.05 for i in range(int(duration / 0.05))]
-    ones = [1.0] * len(frames)
-    return MusicFeatures(
-        track="synthetic", duration_seconds=duration, sample_rate=22050,
-        hop_length=512, bpm=120.0, beats=list(beats), frame_times=frames,
-        onset_strength=ones, rms=ones, bass_energy=ones,
-        mid_energy=ones, high_energy=ones,
-    )
-
-
-class TestBeatCueSource(unittest.TestCase):
+class TestBeatTimeline(unittest.TestCase):
     def setUp(self):
-        self.source = BeatCueSource(make_features([0.5, 1.0, 1.5, 2.0]))
+        self.timeline = BeatTimeline(make_features([0.5, 1.0, 1.5, 2.0], duration=4.0))
 
-    def test_cues_fire_in_order_once_each(self):
-        self.assertEqual(self.source.poll(0.4), [])
-        first = self.source.poll(0.52)
-        self.assertEqual([c.index for c in first], [0])
-        self.assertEqual(self.source.poll(0.52), [], "a cue fired twice")
-        self.assertEqual([c.index for c in self.source.poll(1.02)], [1])
+    def test_one_cue_per_beat(self):
+        self.assertEqual(len(self.timeline), 4)
+        self.assertEqual(
+            [self.timeline.cue(i).scheduled_time for i in range(4)],
+            [0.5, 1.0, 1.5, 2.0],
+        )
 
-    def test_stale_cues_are_dropped_not_burst(self):
-        """After a stall the avatar must not fire every missed beat at once."""
-        cues = self.source.poll(2.0)
-        self.assertEqual([c.index for c in cues], [3], "missed beats were replayed")
-        self.assertEqual(self.source.pending, 0)
+    def test_cue_before_picks_the_latest_past_beat(self):
+        self.assertIsNone(self.timeline.cue_before(0.4))
+        self.assertEqual(self.timeline.cue_before(0.5).index, 0)
+        self.assertEqual(self.timeline.cue_before(1.4).index, 1)
+        self.assertEqual(self.timeline.cue_before(99.0).index, 3)
 
     def test_strength_stays_in_range(self):
-        for cue in self.source.poll(2.0):
-            self.assertGreaterEqual(cue.strength, 0.25)
-            self.assertLessEqual(cue.strength, 1.0)
+        for index in range(len(self.timeline)):
+            strength = self.timeline.cue(index).strength
+            self.assertGreaterEqual(strength, 0.25)
+            self.assertLessEqual(strength, 1.0)
 
-    def test_reset_seeks_to_a_position(self):
-        self.source.reset(1.2)
-        self.assertEqual([c.index for c in self.source.poll(1.6)], [2])
+    def test_end_time_is_the_last_beat(self):
+        self.assertEqual(self.timeline.end_time, 2.0)
+
+    def test_empty_timeline_is_usable(self):
+        empty = BeatTimeline(make_features([], duration=4.0))
+        self.assertEqual(len(empty), 0)
+        self.assertEqual(empty.end_time, 0.0)
+        self.assertIsNone(empty.cue_before(1.0))
 
 
-class TestSyncRecorder(unittest.TestCase):
-    def test_summary_statistics(self):
-        recorder = SyncRecorder()
-        recorder.record(0, 1.000, 1.010)   # +10 ms
-        recorder.record(1, 2.000, 1.996)   #  -4 ms
-        recorder.record(2, 3.000, 3.001)   #  +1 ms
-        summary = recorder.summary()
-        self.assertEqual(summary["beats"], 3)
-        self.assertAlmostEqual(summary["mean_abs_error_ms"], 5.0, places=1)
-        self.assertAlmostEqual(summary["median_abs_error_ms"], 4.0, places=1)
-        self.assertAlmostEqual(summary["max_abs_error_ms"], 10.0, places=1)
+class TestTimingRecorder(unittest.TestCase):
+    def _state(self, time, beat_index, beat_age):
+        from ghost_in_the_deck.animation.controller import MotionState
+
+        return MotionState(
+            time=time, impulse=0.5, sway=0.0, beat_index=beat_index, beat_age=beat_age
+        )
+
+    def test_first_frame_showing_a_beat_records_its_latency(self):
+        recorder = TimingRecorder(visible_for=0.48)
+        response = recorder.record_frame(self._state(1.01, 0, 0.01), observed_at=1.01)
+        self.assertIsNotNone(response)
+        self.assertAlmostEqual(response.latency_ms, 10.0, places=6)
+        self.assertAlmostEqual(response.beat_time, 1.0, places=6)
+
+    def test_a_beat_is_only_recorded_once(self):
+        recorder = TimingRecorder(visible_for=0.48)
+        recorder.record_frame(self._state(1.01, 0, 0.01), observed_at=1.01)
+        again = recorder.record_frame(self._state(1.10, 0, 0.10), observed_at=1.10)
+        self.assertIsNone(again)
+        self.assertEqual(len(recorder.responses), 1)
+
+    def test_beats_with_no_frame_are_counted_as_never_rendered(self):
+        recorder = TimingRecorder(visible_for=0.48)
+        recorder.record_frame(self._state(1.01, 0, 0.01), observed_at=1.01)
+        recorder.record_frame(self._state(3.01, 4, 0.01), observed_at=3.01)
+        self.assertEqual(recorder.summary()["beats_displayed"], 2)
+        self.assertEqual(recorder.beats_never_rendered, 3)   # indices 1, 2, 3
+
+    def test_a_beat_seen_too_late_is_not_counted_as_displayed(self):
+        recorder = TimingRecorder(visible_for=0.48)
+        recorder.record_frame(self._state(2.00, 0, 1.00), observed_at=2.00)
+        self.assertEqual(recorder.summary()["beats_displayed"], 0)
+
+    def test_state_lag_reports_the_pose_age(self):
+        recorder = TimingRecorder()
+        recorder.record_frame(self._state(1.0, 0, 0.01), observed_at=1.004)
+        self.assertAlmostEqual(recorder.summary()["state_lag"]["max_ms"], 4.0, places=3)
 
     def test_empty_recorder_is_reported_not_crashed(self):
-        self.assertEqual(SyncRecorder().summary(), {"beats": 0})
+        summary = TimingRecorder().summary()
+        self.assertEqual(summary["frames"], 0)
+        self.assertEqual(summary["beats_displayed"], 0)
+        self.assertEqual(summary["beats_never_rendered"], 0)
+        self.assertIn("Frames rendered", TimingRecorder().format_summary())
 
 
 @unittest.skipUnless(BAM.is_file(), "avatar asset not built")
@@ -99,21 +125,23 @@ class TestVisibleMovement(unittest.TestCase):
         cls.base.render.setLight(cls.base.render.attachNewNode(ambient))
 
         cls.rig = AvatarRig(BAM, parent=cls.base.render)
-        # Sway is disabled here so the pixel comparisons isolate the beat movement.
-        cls.animator = AvatarAnimator(cls.rig, sway_period=1.0e9)
+        # One beat at t=1.0. Sway is disabled so the pixel comparisons isolate
+        # the beat movement.
+        cls.timeline = BeatTimeline(make_features([1.0], duration=4.0))
+        cls.animator = AvatarAnimator(
+            cls.rig, cls.timeline, sway_period=1.0e9
+        )
 
     def test_avatar_is_actually_drawn(self):
-        self.animator.reset()
+        self.animator.apply_at(0.0)
         frame = panda_env.render_screenshot()
         self.assertGreater(frame.std(), 4.0, "frame looks like an empty background")
 
     def test_beat_changes_the_rendered_image(self):
-        self.animator.reset()
-        self.animator.update(1 / 60)
+        self.animator.apply_at(0.5)               # before the beat
         rest = panda_env.render_screenshot().astype(np.int16)
 
-        self.animator.apply_cue(MotionCue("beat", 0.0, 1.0, 0))
-        self.animator.update(1 / 60)
+        self.animator.apply_at(1.01)              # just after it
         moved = panda_env.render_screenshot().astype(np.int16)
 
         changed = np.abs(moved - rest).max(axis=2)
@@ -121,17 +149,34 @@ class TestVisibleMovement(unittest.TestCase):
         self.assertGreater(ratio, 0.005, f"only {ratio:.4%} of pixels changed on a beat")
 
     def test_pose_returns_between_beats(self):
-        self.animator.reset()
-        self.animator.update(1 / 60)
+        self.animator.apply_at(0.5)
         rest = panda_env.render_screenshot().astype(np.int16)
 
-        self.animator.apply_cue(MotionCue("beat", 0.0, 1.0, 0))
-        for _ in range(60):  # one second, longer than the decay
-            self.animator.update(1 / 60)
+        self.animator.apply_at(2.5)               # well past the decay
         settled = panda_env.render_screenshot().astype(np.int16)
 
         changed = float((np.abs(settled - rest).max(axis=2) > 12).mean())
         self.assertLess(changed, 0.01, "avatar did not return to rest after a beat")
+
+    def test_rendered_pose_does_not_depend_on_frame_history(self):
+        """The schedule-independence invariant, on the real rig and real pixels."""
+        probe = 1.08
+
+        self.animator.apply_at(probe)
+        direct = panda_env.render_screenshot().astype(np.int16)
+
+        for frame in regular_beats(bpm=300.0, count=40, offset=0.0):
+            if frame >= probe:
+                break
+            self.animator.apply_at(frame)
+        self.animator.apply_at(probe)
+        after_history = panda_env.render_screenshot().astype(np.int16)
+
+        self.assertEqual(
+            int(np.abs(after_history - direct).max()),
+            0,
+            "the pose at a playback time depended on the frames drawn before it",
+        )
 
 
 if __name__ == "__main__":
