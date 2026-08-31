@@ -3,3 +3,4 @@ librosa>=1.0
 numpy>=2.0
 panda3d>=1.10.15
 soundfile>=0.13
+panda3d-gltf>=1.2
