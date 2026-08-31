@@ -51,6 +51,8 @@ class TestBeatTimeline(unittest.TestCase):
 
 
 class TestTimingRecorder(unittest.TestCase):
+    """Per-sample bookkeeping. Coverage accounting lives in test_coverage_metrics."""
+
     def _state(self, time, beat_index, beat_age):
         from ghost_in_the_deck.animation.controller import MotionState
 
@@ -58,43 +60,47 @@ class TestTimingRecorder(unittest.TestCase):
             time=time, impulse=0.5, sway=0.0, beat_index=beat_index, beat_age=beat_age
         )
 
-    def test_first_frame_showing_a_beat_records_its_latency(self):
-        recorder = TimingRecorder(visible_for=0.48)
-        response = recorder.record_frame(self._state(1.01, 0, 0.01), observed_at=1.01)
+    def test_first_sample_carrying_a_beat_records_its_latency(self):
+        recorder = TimingRecorder(beat_times=[1.0], response_window=0.48)
+        response = recorder.record_sample(self._state(1.01, 0, 0.01), observed_at=1.01)
         self.assertIsNotNone(response)
         self.assertAlmostEqual(response.latency_ms, 10.0, places=6)
         self.assertAlmostEqual(response.beat_time, 1.0, places=6)
+        self.assertAlmostEqual(response.sampled_at, 1.01, places=6)
 
     def test_a_beat_is_only_recorded_once(self):
-        recorder = TimingRecorder(visible_for=0.48)
-        recorder.record_frame(self._state(1.01, 0, 0.01), observed_at=1.01)
-        again = recorder.record_frame(self._state(1.10, 0, 0.10), observed_at=1.10)
+        recorder = TimingRecorder(beat_times=[1.0], response_window=0.48)
+        recorder.record_sample(self._state(1.01, 0, 0.01), observed_at=1.01)
+        again = recorder.record_sample(self._state(1.10, 0, 0.10), observed_at=1.10)
         self.assertIsNone(again)
         self.assertEqual(len(recorder.responses), 1)
 
-    def test_beats_with_no_frame_are_counted_as_never_rendered(self):
-        recorder = TimingRecorder(visible_for=0.48)
-        recorder.record_frame(self._state(1.01, 0, 0.01), observed_at=1.01)
-        recorder.record_frame(self._state(3.01, 4, 0.01), observed_at=3.01)
-        self.assertEqual(recorder.summary()["beats_displayed"], 2)
-        self.assertEqual(recorder.beats_never_rendered, 3)   # indices 1, 2, 3
-
-    def test_a_beat_seen_too_late_is_not_counted_as_displayed(self):
-        recorder = TimingRecorder(visible_for=0.48)
-        recorder.record_frame(self._state(2.00, 0, 1.00), observed_at=2.00)
-        self.assertEqual(recorder.summary()["beats_displayed"], 0)
+    def test_a_beat_carried_too_late_is_not_counted_as_sampled(self):
+        recorder = TimingRecorder(beat_times=[1.0], response_window=0.48)
+        recorder.record_sample(self._state(2.00, 0, 1.00), observed_at=2.00)
+        self.assertEqual(recorder.summary()["beats_sampled"], 0)
 
     def test_state_lag_reports_the_pose_age(self):
         recorder = TimingRecorder()
-        recorder.record_frame(self._state(1.0, 0, 0.01), observed_at=1.004)
+        recorder.record_sample(self._state(1.0, 0, 0.01), observed_at=1.004)
         self.assertAlmostEqual(recorder.summary()["state_lag"]["max_ms"], 4.0, places=3)
 
     def test_empty_recorder_is_reported_not_crashed(self):
         summary = TimingRecorder().summary()
-        self.assertEqual(summary["frames"], 0)
-        self.assertEqual(summary["beats_displayed"], 0)
-        self.assertEqual(summary["beats_never_rendered"], 0)
-        self.assertIn("Frames rendered", TimingRecorder().format_summary())
+        self.assertEqual(summary["update_samples"], 0)
+        self.assertEqual(summary["beats_sampled"], 0)
+        self.assertEqual(summary["beats_missed"], 0)
+        self.assertIn("Update samples", TimingRecorder().format_summary())
+
+    def test_summary_wording_does_not_claim_presentation(self):
+        """Naming must describe update samples, not verified display output."""
+        recorder = TimingRecorder(beat_times=[1.0], response_window=0.48)
+        recorder.record_sample(self._state(1.01, 0, 0.01), observed_at=1.01)
+        text = recorder.format_summary()
+        self.assertIn("Update samples", text)
+        self.assertIn("not verified monitor presentation", text)
+        for banned in ("Frames rendered", "displayed", "never rendered", "on screen"):
+            self.assertNotIn(banned, text, f"{banned!r} overclaims what was measured")
 
 
 @unittest.skipUnless(BAM.is_file(), "avatar asset not built")

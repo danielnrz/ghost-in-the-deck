@@ -71,15 +71,16 @@ class GhostApp:
         self._frame_avatar()
         self.timeline = BeatTimeline(self.features)
         self.animator = AvatarAnimator(self.rig, self.timeline)
-        self.recorder = TimingRecorder(visible_for=self.animator.visible_for)
+        self.recorder = TimingRecorder(
+            beat_times=self.features.beats,
+            response_window=self.animator.response_window,
+        )
 
         sound = None
         if not args.no_audio:
             sound = self.base.loader.loadSfx(str(to_wav(self.track)))
         self.clock = PlaybackClock(sound)
 
-        self._previous_audio: float | None = None
-        self._previous_wall: float | None = None
         self._next_stall_at = args.stall_every if args.stall_every else None
         self.base.taskMgr.add(self._update, "ghost-update")
 
@@ -125,30 +126,27 @@ class GhostApp:
 
     # ------------------------------------------------------------------ frame
     def _update(self, task):
-        entered = time.perf_counter()
         now = self.clock.time()
 
-        # Deliberately freeze the update to show that a stalled renderer does not
+        # Deliberately freeze the update to show that a stalled loop does not
         # leave the musical state behind. Off unless asked for.
         if self._next_stall_at is not None and now >= self._next_stall_at:
             time.sleep(self.args.simulate_stall)
             self._next_stall_at = now + self.args.stall_every
             now = self.clock.time()
 
-        audio_interval = None if self._previous_audio is None else now - self._previous_audio
-        wall_interval = None if self._previous_wall is None else entered - self._previous_wall
-        self._previous_audio = now
-        self._previous_wall = entered
+        # Taken together with `now`, so the playback and wall endpoints of the
+        # interval measurements line up. The simulated stall sits before both.
+        wall_now = time.perf_counter()
 
         state = self.animator.apply_at(now)
-        update_seconds = time.perf_counter() - entered
+        update_seconds = time.perf_counter() - wall_now
 
-        response = self.recorder.record_frame(
+        response = self.recorder.record_sample(
             state,
             observed_at=self.clock.time(),
-            frame_interval=audio_interval,
+            wall_time=wall_now,
             update_seconds=update_seconds,
-            wall_interval=wall_interval,
         )
         if response is not None and self.args.verbose:
             print(response.format(), flush=True)
@@ -157,7 +155,11 @@ class GhostApp:
             return self._finish()
         if now >= self.features.duration_seconds:
             return self._finish()
-        if now > self.timeline.end_time + self.animator.visible_for:
+        if now > self.timeline.end_time + self.animator.response_window:
+            return self._finish()
+        if self.clock.holding:
+            # Playback stopped unexpectedly; do not dance on to a frozen clock.
+            print("playback stopped before the run finished", flush=True)
             return self._finish()
         return task.cont
 

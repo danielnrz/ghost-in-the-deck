@@ -191,21 +191,18 @@ class TestTimelineIsStateless(unittest.TestCase):
 
 
 class TestRecorderSeparatesTheTwoConcepts(unittest.TestCase):
-    """State currency and visual coverage must be reported separately."""
+    """State currency and sample coverage must be reported separately."""
 
     def _run(self, schedule: list[float]) -> TimingRecorder:
         rig = RecordingRig()
         animator = AvatarAnimator(rig, TIMELINE)
-        recorder = TimingRecorder(visible_for=animator.visible_for)
-        previous = None
+        recorder = TimingRecorder(
+            beat_times=BEATS, response_window=animator.response_window
+        )
         for frame in schedule:
-            state = animator.apply_at(frame)
-            recorder.record_frame(
-                state,
-                observed_at=frame,
-                frame_interval=None if previous is None else frame - previous,
+            recorder.record_sample(
+                animator.apply_at(frame), observed_at=frame, wall_time=frame
             )
-            previous = frame
         return recorder
 
     def test_state_lag_is_zero_at_every_frame_rate(self):
@@ -214,24 +211,56 @@ class TestRecorderSeparatesTheTwoConcepts(unittest.TestCase):
             with self.subTest(schedule=name):
                 self.assertAlmostEqual(summary["state_lag"]["max_ms"], 0.0, places=6)
 
-    def test_high_frame_rate_displays_every_beat(self):
+    def test_high_sample_rate_catches_every_beat(self):
         recorder = self._run(SCHEDULES["60 fps"])
-        self.assertEqual(recorder.beats_never_rendered, 0)
-        self.assertEqual(recorder.summary()["beats_displayed"], len(BEATS))
+        self.assertEqual(recorder.beats_missed, 0)
+        self.assertEqual(recorder.summary()["beats_sampled"], len(BEATS))
 
-    def test_low_frame_rate_misses_beats_but_stays_current(self):
-        """At 5 fps the display cannot show everything, and says so honestly."""
-        recorder = self._run(SCHEDULES["5 fps"])
-        summary = recorder.summary()
-        self.assertAlmostEqual(summary["state_lag"]["max_ms"], 0.0, places=6)
-        self.assertGreater(summary["beats_displayed"], 0)
+    def test_sparse_sampling_misses_beats_while_state_stays_current(self):
+        """The distinction, made concrete.
 
-    def test_long_stalls_are_reported_as_never_rendered(self):
+        Samples every 0.833 s against beats every 0.5 s: some response windows
+        fall entirely between samples and are provably uncatchable. Coverage must
+        report exactly those, while the pose at every later time is still exact.
+        """
+        window = AvatarAnimator(RecordingRig(), TIMELINE).response_window
+        schedule = [0.833 * i for i in range(1, 16)]
+
+        # Independent oracle: which beats had no sample inside their window.
+        first, last = schedule[0], schedule[-1]
+        oracle = [
+            index
+            for index, beat in enumerate(BEATS)
+            if first <= beat <= last - window
+            and not any(beat <= s <= beat + window for s in schedule)
+        ]
+        self.assertTrue(oracle, "fixture must actually miss something")
+
+        recorder = self._run(schedule)
+        self.assertEqual(recorder.missed_indices(), oracle)
+        self.assertGreater(recorder.beats_missed, 0)
+        self.assertGreater(recorder.summary()["beats_sampled"], 0)
+
+        # Coverage suffered; musical state did not.
+        self.assertAlmostEqual(recorder.summary()["state_lag"]["max_ms"], 0.0, places=6)
+        rig = RecordingRig()
+        animator = AvatarAnimator(rig, TIMELINE)
+        for frame in schedule:
+            animator.apply_at(frame)
+        for probe in (11.0, 11.37, 11.5):
+            rig.reset()
+            animator.apply_at(probe)
+            after_sparse = rig.pose()
+            self.assertEqual(
+                after_sparse,
+                reference_pose(probe),
+                f"state at {probe} was wrong after a sparse schedule",
+            )
+
+    def test_long_stalls_are_reported_as_missed(self):
         recorder = self._run(SCHEDULES["stall 1000 ms"])
         summary = recorder.summary()
-        self.assertGreater(
-            summary["beats_never_rendered"], 0, "a 1 s stall should miss beats"
-        )
+        self.assertGreater(summary["beats_missed"], 0, "a 1 s stall should miss beats")
         self.assertAlmostEqual(summary["state_lag"]["max_ms"], 0.0, places=6)
 
     def test_beat_latency_stays_within_a_frame_at_60fps(self):
@@ -284,13 +313,17 @@ class TestEndToEndSyntheticTiming(unittest.TestCase):
                 with self.subTest(probe=probe, schedule=name):
                     self.assertEqual(rig.pose(), reference.pose())
 
-    def test_every_beat_is_displayed_when_frames_are_available(self):
+    def test_every_beat_is_sampled_when_the_loop_keeps_up(self):
         rig = RecordingRig()
         animator = AvatarAnimator(rig, self.timeline)
-        recorder = TimingRecorder(visible_for=animator.visible_for)
+        recorder = TimingRecorder(
+            beat_times=self.features.beats, response_window=animator.response_window
+        )
         for frame in steady(60.0, duration=self.features.duration_seconds):
-            recorder.record_frame(animator.apply_at(frame), observed_at=frame)
-        self.assertEqual(recorder.beats_never_rendered, 0)
+            recorder.record_sample(
+                animator.apply_at(frame), observed_at=frame, wall_time=frame
+            )
+        self.assertEqual(recorder.beats_missed, 0)
 
 
 if __name__ == "__main__":

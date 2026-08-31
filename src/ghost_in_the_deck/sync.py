@@ -2,18 +2,28 @@
 
 Two different things are measured here and they must not be confused.
 
-**State currency** - when a frame is drawn, was the pose the one the music calls
+**State currency** - when the update ran, was the pose the one the music calls
 for at that moment? This is what the timing architecture guarantees. It is
 reported as *state lag*: the playback time that had elapsed by the end of the
 update minus the playback time the pose was evaluated for. It stays near zero
 however badly the renderer behaves, because the pose is a pure function of
 playback time rather than something integrated frame by frame.
 
-**Visual coverage** - was a frame drawn at all while a cue's response was on
-screen? A renderer that freezes for a second cannot show anything during that
-second, and no architecture can change that. Beats that pass with no frame are
-counted as *never rendered*. That number is honest: it says the display missed
-them, not that the music drifted.
+**Sample coverage** - did the update run at all while a cue's response was
+current? An update loop that freezes for a second produces no samples during
+that second, and no architecture can change that. Beats that pass with no sample
+are counted as *missed*. That says the loop did not get to them; it does not say
+the music drifted.
+
+What "sampled" does and does not claim
+--------------------------------------
+A sample is recorded in the update task, straight after the pose is written. It
+proves that the application evaluated and wrote the pose for that playback time.
+It does **not** prove that the GPU and compositor put that frame in front of the
+viewer, and it does not prove when. Measuring real presentation would need
+GPU timer queries or compositor presentation feedback, neither of which this
+project does, so the metrics are named for what they actually observe: update
+samples, not presented frames.
 
 Neither figure includes sound card output latency, which would need an external
 recording to quantify.
@@ -22,30 +32,30 @@ recording to quantify.
 from __future__ import annotations
 
 import json
-import math
 import statistics
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 
 
 @dataclass(frozen=True)
 class BeatResponse:
-    """A beat, and the first frame that actually displayed its response."""
+    """A beat, and the first update sample that carried its response."""
 
     index: int
     beat_time: float
-    shown_at: float
+    sampled_at: float
 
     @property
     def latency_ms(self) -> float:
-        return (self.shown_at - self.beat_time) * 1000.0
+        return (self.sampled_at - self.beat_time) * 1000.0
 
     def format(self) -> str:
         return (
             f"Beat {self.index}\n"
-            f"  expected : {self.beat_time:.3f} s\n"
-            f"  shown at : {self.shown_at:.3f} s\n"
-            f"  latency  : {self.latency_ms:+.1f} ms"
+            f"  expected   : {self.beat_time:.3f} s\n"
+            f"  sampled at : {self.sampled_at:.3f} s\n"
+            f"  latency    : {self.latency_ms:+.1f} ms"
         )
 
 
@@ -62,116 +72,151 @@ def _stats(values: list[float]) -> dict:
 
 
 class TimingRecorder:
-    """Collects per-frame and per-beat timing during a run."""
+    """Collects per-sample and per-beat timing during a run.
 
-    def __init__(self, visible_for: float = 0.48):
-        self.visible_for = visible_for
+    The beat times are supplied up front rather than inferred from whatever
+    happened to be observed. Coverage is then a comparison between the beats the
+    run passed through and the beats a sample actually caught, which is the only
+    way a beat missed before the first successful sample can be counted.
+    """
+
+    def __init__(self, beat_times=None, response_window: float = 0.48):
+        self.response_window = response_window
+        self._beat_times: list[float] = sorted(beat_times or [])
         self.responses: list[BeatResponse] = []
 
         self._state_lags: list[float] = []
-        self._frame_intervals: list[float] = []
+        self._sample_intervals: list[float] = []
         self._update_costs: list[float] = []
         self._clock_skews: list[float] = []
 
-        self._frames = 0
+        self._samples = 0
         self._first_time: float | None = None
         self._last_time = 0.0
         self._last_beat_index = -1
         self._beats_seen: set[int] = set()
-        self._first_beat_index: int | None = None
+
+        self._previous_audio: float | None = None
+        self._previous_wall: float | None = None
 
     # ---------------------------------------------------------------- capture
-    def record_frame(
+    def record_sample(
         self,
         state,
         observed_at: float,
-        frame_interval: float | None = None,
+        wall_time: float | None = None,
         update_seconds: float = 0.0,
-        wall_interval: float | None = None,
     ) -> BeatResponse | None:
-        """Log one rendered frame.
+        """Log one update sample.
 
-        ``state`` is the MotionState the frame drew, ``observed_at`` is the
-        playback time read once the update had finished. Returns the beat
-        response if this frame was the first to show a new beat.
+        ``state`` is the MotionState just written, ``observed_at`` is the
+        playback time read once the update had finished, and ``wall_time`` is a
+        wall-clock reading taken at the same moment as the playback time the
+        pose was evaluated for.
+
+        Both intervals are derived here from the readings this method is given,
+        so the playback and wall endpoints are matched by construction. Deriving
+        them separately at the call site is what previously let an injected
+        stall land in one interval but not the other.
+
+        Returns the beat response when this sample is the first to carry a beat.
         """
-        self._frames += 1
+        self._samples += 1
         if self._first_time is None:
             self._first_time = state.time
         self._last_time = max(self._last_time, observed_at)
 
         self._state_lags.append((observed_at - state.time) * 1000.0)
         self._update_costs.append(update_seconds * 1000.0)
-        if frame_interval is not None:
-            self._frame_intervals.append(frame_interval * 1000.0)
-            if wall_interval is not None:
-                self._clock_skews.append((frame_interval - wall_interval) * 1000.0)
 
-        # A beat counts as displayed the first time a frame draws it while its
-        # response is still visible.
+        if self._previous_audio is not None:
+            audio_interval = state.time - self._previous_audio
+            self._sample_intervals.append(audio_interval * 1000.0)
+            if wall_time is not None and self._previous_wall is not None:
+                wall_interval = wall_time - self._previous_wall
+                self._clock_skews.append((audio_interval - wall_interval) * 1000.0)
+        self._previous_audio = state.time
+        self._previous_wall = wall_time
+
+        # A beat is covered by the first sample that carries it while its
+        # response is still within the reporting window.
         response = None
         if (
             state.has_beat
             and state.beat_index != self._last_beat_index
             and state.beat_index not in self._beats_seen
-            and state.beat_age <= self.visible_for
+            and state.beat_age <= self.response_window
         ):
             response = BeatResponse(
                 index=state.beat_index,
                 beat_time=state.time - state.beat_age,
-                shown_at=state.time,
+                sampled_at=state.time,
             )
             self.responses.append(response)
             self._beats_seen.add(state.beat_index)
-            if self._first_beat_index is None:
-                self._first_beat_index = state.beat_index
         if state.has_beat:
             self._last_beat_index = state.beat_index
         return response
 
     # ---------------------------------------------------------------- reports
+    def beats_in_scope(self) -> list[int]:
+        """Indices of beats this run can be held responsible for.
+
+        A beat counts when the run was already sampling before it happened and
+        was still sampling once its whole response window had passed. Anything
+        outside that cannot be adjudicated: the run either had not started or
+        had already stopped, and blaming it for those would be wrong in both
+        directions.
+        """
+        if self._first_time is None or not self._beat_times:
+            return []
+        first = bisect_left(self._beat_times, self._first_time)
+        last = bisect_right(self._beat_times, self._last_time - self.response_window)
+        return list(range(first, max(first, last)))
+
     @property
-    def beats_never_rendered(self) -> int:
-        """Beats inside the observed span that no frame ever displayed."""
-        if self._first_beat_index is None:
-            return 0
-        span = range(self._first_beat_index, self._last_beat_index + 1)
-        return sum(1 for index in span if index not in self._beats_seen)
+    def beats_missed(self) -> int:
+        """In-scope beats that no update sample carried."""
+        return sum(1 for index in self.beats_in_scope() if index not in self._beats_seen)
+
+    def missed_indices(self) -> list[int]:
+        return [i for i in self.beats_in_scope() if i not in self._beats_seen]
 
     def summary(self) -> dict:
         elapsed = 0.0
         if self._first_time is not None:
             elapsed = max(self._last_time - self._first_time, 0.0)
-        fps = round(self._frames / elapsed, 1) if elapsed > 0 else 0.0
+        rate = round(self._samples / elapsed, 1) if elapsed > 0 else 0.0
 
         latencies = [r.latency_ms for r in self.responses]
         return {
-            "frames": self._frames,
+            "update_samples": self._samples,
             "elapsed_seconds": round(elapsed, 3),
-            "average_fps": fps,
-            "frame_interval": _stats(self._frame_intervals),
+            "update_rate_hz": rate,
+            "sample_interval": _stats(self._sample_intervals),
             "update_cost": _stats(self._update_costs),
             "state_lag": _stats(self._state_lags),
-            "audio_vs_wall_skew": _stats(self._clock_skews),
-            "beats_displayed": len(self.responses),
-            "beats_never_rendered": self.beats_never_rendered,
+            "playback_vs_wall_skew": _stats(self._clock_skews),
+            "beats_in_scope": len(self.beats_in_scope()),
+            "beats_sampled": len(self.responses),
+            "beats_missed": self.beats_missed,
             "beat_response_latency": _stats(latencies),
         }
 
     def format_summary(self) -> str:
         data = self.summary()
-        interval = data["frame_interval"]
+        interval = data["sample_interval"]
         lag = data["state_lag"]
         cost = data["update_cost"]
         latency = data["beat_response_latency"]
 
         lines = [
-            f"Frames rendered       : {data['frames']}  ({data['average_fps']} fps"
-            f" over {data['elapsed_seconds']:.1f} s)",
+            f"Update samples        : {data['update_samples']}  "
+            f"({data['update_rate_hz']} Hz over {data['elapsed_seconds']:.1f} s)",
         ]
         if interval.get("count"):
             lines.append(
-                f"Frame interval        : mean {interval['mean_ms']:.2f} ms, "
+                f"Sample interval       : mean {interval['mean_ms']:.2f} ms, "
                 f"median {interval['median_ms']:.2f} ms, worst {interval['max_ms']:.1f} ms"
             )
         if cost.get("count"):
@@ -185,17 +230,21 @@ class TimingRecorder:
                 f"worst {lag['max_ms']:.2f} ms   (pose age when written)"
             )
         lines.append(
-            f"Beats displayed       : {data['beats_displayed']}"
+            f"Beats sampled         : {data['beats_sampled']} of "
+            f"{data['beats_in_scope']} in scope"
         )
         lines.append(
-            f"Beats never rendered  : {data['beats_never_rendered']}"
-            "   (no frame while the response was on screen)"
+            f"Beats missed          : {data['beats_missed']}"
+            "   (no update sample inside the response window)"
         )
         if latency.get("count"):
             lines.append(
                 f"Beat response latency : mean {latency['mean_ms']:.2f} ms, "
                 f"median {latency['median_ms']:.2f} ms, max {latency['max_ms']:.1f} ms"
             )
+        lines.append(
+            "Samples are update-task observations, not verified monitor presentation."
+        )
         return "\n".join(lines)
 
     def save(self, path: Path | str, track: str = "") -> Path:
@@ -206,26 +255,52 @@ class TimingRecorder:
                 {
                     "track": track,
                     "metric_semantics": {
+                        "what_a_sample_is": (
+                            "One update-task run, recorded straight after the pose "
+                            "was written. It proves the application evaluated and "
+                            "wrote that pose for that playback time. It does not "
+                            "prove the GPU or compositor presented the frame, which "
+                            "this project does not measure."
+                        ),
                         "state_lag": (
                             "Playback time elapsed during the update minus the time "
                             "the pose was evaluated for. Near zero by construction; "
                             "a large value would mean the musical state fell behind."
                         ),
-                        "beats_never_rendered": (
-                            "Beats no frame displayed because rendering stalled. A "
-                            "display limitation, not a timeline error."
+                        "beats_in_scope": (
+                            "Beats the run was sampling before they happened and "
+                            "still sampling once their response window had passed, "
+                            "so coverage can be judged for them."
+                        ),
+                        "beats_missed": (
+                            "In-scope beats no update sample carried, because the "
+                            "loop did not run during their response window. A loop "
+                            "limitation, not a timeline error."
                         ),
                         "beat_response_latency": (
-                            "For beats that were displayed, the delay before the "
-                            "first frame showing them."
+                            "For beats that were sampled, the delay before the "
+                            "first sample carrying them."
+                        ),
+                        "response_window": (
+                            "Reporting threshold in seconds, shared with the "
+                            "animator: how soon after a beat a sample must occur "
+                            "for that beat to count as covered. A deliberate "
+                            "diagnostic choice, not a physical visibility boundary."
+                        ),
+                        "playback_vs_wall_skew": (
+                            "Playback interval minus wall interval between "
+                            "consecutive samples, both endpoints taken together. "
+                            "Near zero unless the two clocks genuinely diverge."
                         ),
                     },
+                    "response_window_seconds": round(self.response_window, 4),
                     "summary": self.summary(),
+                    "missed_beat_indices": self.missed_indices(),
                     "beats": [
                         {
                             "index": r.index,
                             "expected": round(r.beat_time, 4),
-                            "shown_at": round(r.shown_at, 4),
+                            "sampled_at": round(r.sampled_at, 4),
                             "latency_ms": round(r.latency_ms, 2),
                         }
                         for r in self.responses

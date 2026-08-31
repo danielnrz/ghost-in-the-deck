@@ -66,9 +66,32 @@ A run prints two independent things, and they must not be confused.
 | Metric | Meaning |
 |---|---|
 | **State lag** | Playback time elapsed during the update minus the time the pose was evaluated for. Near zero by construction. A large value would mean the musical state had fallen behind - the thing the architecture exists to prevent. |
-| **Beats never rendered** | Beats that no frame displayed because rendering stalled through them. A display limitation, not a timing error. Honest by design: a one second freeze physically cannot show the beats inside it. |
-| **Beat response latency** | For beats that *were* displayed, how long before the first frame showing them. Roughly one frame interval when rendering is healthy. |
-| **Frame interval / update cost** | Total time between frames, and the share of it spent in this project's own code. The gap between them is where a stall actually lives. |
+| **Beats missed** | In-scope beats that no update sample carried, because the loop did not run during their response window. A loop limitation, not a timing error: a one second freeze physically cannot sample the beats inside it. |
+| **Beats in scope** | Beats the run was already sampling before they happened and still sampling once their response window had passed. Beats outside that cannot be judged fairly - the run had not started, or had already stopped. |
+| **Beat response latency** | For beats that *were* sampled, how long before the first sample carrying them. Roughly one sample interval when the loop is healthy. |
+| **Sample interval / update cost** | Total time between update samples, and the share of it spent in this project's own code. The gap between them is where a stall actually lives. |
+
+### What a "sample" is, and is not
+
+A sample is recorded in the update task, straight after the pose is written. It
+proves the application **evaluated and wrote** the pose for that playback time.
+
+It does **not** prove the GPU and compositor put that frame in front of the
+viewer, nor when. Measuring real presentation would need GPU timer queries or
+compositor presentation feedback, neither of which this project does. The metrics
+are therefore named for what is actually observed - update samples - rather than
+frames presented. The terminal output says so on its last line.
+
+### The response window
+
+Coverage uses a `response_window` of three decay constants (~0.48 s), shared with
+the animator so the numbers and the movement cannot drift apart.
+
+This is a deliberate reporting threshold, not a physical boundary. The impulse is
+still mathematically non-zero past it - it only falls under the animator's
+epsilon after roughly seven decay constants - but by three the movement is down
+to about 5% of peak, below which counting a sample as having captured the
+response would be generous.
 
 ## Requirements
 
@@ -120,8 +143,8 @@ PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app \
     --seconds 30 --simulate-stall 1.0 --stall-every 3.0
 ```
 
-Beats inside each freeze are reported as never rendered, while state lag stays
-near zero - the display misses frames, the music does not drift.
+Beats inside each freeze are reported as missed, while state lag stays near
+zero - the loop misses samples, the music does not drift.
 
 ## Tests
 
@@ -175,8 +198,14 @@ Two format notes, both learned the hard way:
 - Analysis runs before playback. There is no live or microphone input.
 - Timing is measured against Panda3D's playback clock. It does not include sound
   card output latency, which would need an external recording to measure.
-- Poses are evaluated on the render thread, so a stalled renderer still means
-  missed frames. The music does not drift, but nothing is drawn during a freeze.
+- Poses are evaluated on the render thread, so a stalled loop still means missed
+  samples. The music does not drift, but nothing is drawn during a freeze.
+- Presentation to the monitor is not measured, only update samples. See above.
+- Panda3D's `AudioSound.status()` has only BAD, READY and PLAYING, so a track
+  that ended, was stopped early, underran or failed are indistinguishable. The
+  clock treats every non-playing state alike: it keeps extrapolating for a short
+  grace period, then holds its position rather than running on silently. There is
+  no pause or resume support.
 - Frame delivery on a Wayland compositor varies with display state. The same
   build has been measured at both 166 fps and under 2 fps on this machine
   depending on whether the surface was actually being composited.

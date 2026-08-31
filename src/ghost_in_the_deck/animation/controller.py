@@ -62,11 +62,17 @@ class AvatarAnimator:
         self.sway_period = sway_period
 
     @property
-    def visible_for(self) -> float:
-        """How long a cue's response stays visible.
+    def response_window(self) -> float:
+        """Reporting threshold: how soon after a cue a sample must occur to count.
 
-        Three decay constants leaves about 5% of the movement, which is the
-        point past which a frame would show nothing worth calling a response.
+        This is a deliberate diagnostic choice, not a physical boundary. The
+        impulse is still mathematically non-zero past this point - it only
+        reaches IMPULSE_EPSILON after roughly seven decay constants - but three
+        decay constants leaves about 5% of the movement, below which counting a
+        sample as having captured the response would be generous.
+
+        Coverage reporting and the animation share this one definition so the
+        numbers and the movement cannot drift apart.
         """
         return self.decay * 3.0
 
