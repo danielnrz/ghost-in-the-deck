@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Local test music (audio stays on this machine only)
+testMusic/*
+!testMusic/.gitkeep
+
+# Generated / cached artefacts
+cache/
+out/
+*.log
+
+# Blender temporary files
+*.blend1
+*.blend2
+*.blend@
+
+# OS
+.DS_Store
