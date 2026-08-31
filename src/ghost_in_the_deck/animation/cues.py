@@ -21,6 +21,39 @@ from dataclasses import dataclass
 from ..audio.features import MusicFeatures
 
 
+# Beats per bar. Assumed rather than detected: the four-on-the-floor bar is the
+# right default for the dance music this is aimed at, and a wrong guess only
+# changes which slow variation lands on which beat, never the beat timing.
+BEATS_PER_BAR = 4
+
+# Used when a track has too few beats to measure an interval from.
+FALLBACK_INTERVAL = 0.5
+
+
+@dataclass(frozen=True)
+class BeatPhase:
+    """Where a playback time sits between two beats.
+
+    ``phase`` runs 0 at the previous beat to 1 at the next, which is what lets
+    movement be continuous instead of a decaying twitch after each beat.
+    """
+
+    index: int              # previous beat; -1 before the first
+    phase: float            # 0.0 .. 1.0 through the current beat
+    interval: float         # seconds between the surrounding beats
+    previous_time: float
+    next_time: float
+
+    @property
+    def bar_phase(self) -> float:
+        """0.0 .. 1.0 through a bar, so slower motion can span several beats."""
+        return ((self.index % BEATS_PER_BAR) + self.phase) / BEATS_PER_BAR
+
+    @property
+    def bar_index(self) -> int:
+        return self.index // BEATS_PER_BAR
+
+
 @dataclass(frozen=True)
 class MotionCue:
     """A single request for the avatar to do something."""
@@ -83,3 +116,69 @@ class BeatTimeline:
 
     def cue(self, index: int) -> MotionCue:
         return self._cues[index]
+
+    @property
+    def nominal_interval(self) -> float:
+        """Typical seconds between beats, for extrapolating outside the beats."""
+        if len(self._times) >= 2:
+            return (self._times[-1] - self._times[0]) / (len(self._times) - 1)
+        bpm = getattr(self.features, "bpm", 0.0)
+        return 60.0 / bpm if bpm else FALLBACK_INTERVAL
+
+    def phase_at(self, time: float) -> BeatPhase:
+        """Continuous rhythmic position at ``time``.
+
+        Stateless like the rest of the timeline: the answer depends only on the
+        time asked about. Before the first beat and after the last one the grid
+        is extrapolated at the nominal interval, so the avatar keeps moving
+        through an intro or an outro rather than standing still.
+        """
+        nominal = self.nominal_interval
+        if not self._times:
+            phase = (time / nominal) % 1.0 if nominal > 0 else 0.0
+            return BeatPhase(
+                index=-1,
+                phase=phase,
+                interval=nominal,
+                previous_time=time - phase * nominal,
+                next_time=time + (1.0 - phase) * nominal,
+            )
+
+        index = self.index_before(time)
+
+        if index < 0:                       # before the first beat
+            first = self._times[0]
+            behind = (first - time) / nominal
+            phase = (1.0 - (behind % 1.0)) % 1.0
+            return BeatPhase(
+                index=-1,
+                phase=phase,
+                interval=nominal,
+                previous_time=time - phase * nominal,
+                next_time=time + (1.0 - phase) * nominal,
+            )
+
+        previous = self._times[index]
+        if index + 1 < len(self._times):
+            following = self._times[index + 1]
+        else:                               # past the last beat
+            following = previous + nominal
+
+        interval = following - previous
+        if interval <= 0:
+            interval = nominal
+        phase = (time - previous) / interval
+        if phase >= 1.0:                    # only reachable past the last beat
+            whole = int(phase)
+            index += whole
+            previous += whole * interval
+            following = previous + interval
+            phase -= whole
+
+        return BeatPhase(
+            index=index,
+            phase=min(max(phase, 0.0), 1.0),
+            interval=interval,
+            previous_time=previous,
+            next_time=following,
+        )
