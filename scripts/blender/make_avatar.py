@@ -65,7 +65,7 @@ def configure_human(scene) -> None:
     # Helper geometry, clothes and extra groups are authoring aids that would
     # only add stray meshes and vertex groups to the exported file.
     scene.MPFB_NH_detailed_helpers = False
-    scene.MPFB_NH_mask_helpers = False
+    scene.MPFB_NH_mask_helpers = True
     scene.MPFB_NH_load_clothes = False
     scene.MPFB_NH_add_breast = False
     scene.MPFB_NH_extra_vertex_groups = False
@@ -83,6 +83,26 @@ def configure_rig(scene, rig_name: str) -> None:
     scene.MPFB_ADR_standard_rig = rig_name
     scene.MPFB_ADR_import_weights = True
     scene.MPFB_ADR_auto_generate = False
+
+
+def ensure_material(body) -> None:
+    """Give the body a plain shader if MPFB left it unmaterialised.
+
+    The enhanced skins depend on asset packs that are not part of the add-on, so
+    a headless run can end up with no material at all, which glTF exports as an
+    untextured primitive.
+    """
+    if body.data.materials and body.data.materials[0] is not None:
+        return
+
+    material = bpy.data.materials.new("GhostSkin")
+    material.use_nodes = True
+    principled = material.node_tree.nodes.get("Principled BSDF")
+    if principled:
+        principled.inputs["Base Color"].default_value = (0.62, 0.48, 0.42, 1.0)
+        principled.inputs["Roughness"].default_value = 0.65
+        principled.inputs["Metallic"].default_value = 0.0
+    body.data.materials.append(material)
 
 
 def find_objects():
@@ -110,6 +130,12 @@ def build(rig_name: str):
     body.name = "GhostBody"
     select_only(body)
 
+    # The MakeHuman basemesh ships with helper geometry (a skirt-like proxy for
+    # clothes, hair and eye guides). Blender only hides it behind a mask
+    # modifier, so it would still reach the exported mesh. Remove it outright.
+    bpy.ops.mpfb.delete_helpers()
+    ensure_material(body)
+
     configure_rig(scene, rig_name)
     bpy.ops.mpfb.add_standard_rig()
 
@@ -125,6 +151,12 @@ def verify(body, armature) -> list[str]:
     problems = []
     if len(body.data.vertices) < 1000:
         problems.append(f"body mesh looks too small: {len(body.data.vertices)} verts")
+    if len(body.data.vertices) > 15000:
+        problems.append(
+            f"body still carries helper geometry: {len(body.data.vertices)} verts"
+        )
+    if not body.data.materials:
+        problems.append("body has no material")
 
     bone_names = set(armature.data.bones.keys())
     missing = [b for b in REQUIRED_BONES if b not in bone_names]

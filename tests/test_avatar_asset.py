@@ -77,20 +77,11 @@ class TestBamRuntimeAsset(unittest.TestCase):
     def setUpClass(cls):
         if not BAM.is_file():
             raise unittest.SkipTest(f"{BAM} not built")
+        import panda_env
         from ghost_in_the_deck.animation.rig import AvatarRig
-        from panda3d.core import loadPrcFileData
 
-        loadPrcFileData("", "window-type none")
-        loadPrcFileData("", "audio-library-name null")
-        from direct.showbase.ShowBase import ShowBase
-
-        cls.base = ShowBase()
+        cls.base = panda_env.get_base()
         cls.rig = AvatarRig(BAM)
-
-    @classmethod
-    def tearDownClass(cls):
-        if hasattr(cls, "base"):
-            cls.base.destroy()
 
     def test_joints_are_present(self):
         joints = self.rig.joint_names()

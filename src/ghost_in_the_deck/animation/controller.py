@@ -32,6 +32,12 @@ class AvatarAnimator:
         self._impulse = 0.0
         self._sway_phase = 0.0
 
+    def reset(self) -> None:
+        """Return to the rest pose and forget any movement in flight."""
+        self._impulse = 0.0
+        self._sway_phase = 0.0
+        self.rig.reset()
+
     def apply_cue(self, cue: MotionCue) -> None:
         """Start a new movement. Re-triggering takes the stronger of the two so
         a fast beat cannot make the avatar stutter mid-nod."""
