@@ -167,12 +167,16 @@ class TimingRecorder:
         outside that cannot be adjudicated: the run either had not started or
         had already stopped, and blaming it for those would be wrong in both
         directions.
+
+        A beat that was actually sampled is always in scope. Its window may have
+        run past the end of the run, but there is nothing to decide - it was
+        caught. Leaving it out is what made a full run report "65 of 64".
         """
         if self._first_time is None or not self._beat_times:
-            return []
+            return sorted(self._beats_seen)
         first = bisect_left(self._beat_times, self._first_time)
         last = bisect_right(self._beat_times, self._last_time - self.response_window)
-        return list(range(first, max(first, last)))
+        return sorted(set(range(first, max(first, last))) | self._beats_seen)
 
     @property
     def beats_missed(self) -> int:

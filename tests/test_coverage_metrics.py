@@ -95,15 +95,18 @@ class TestMissedBeatAccounting(unittest.TestCase):
         self.assertEqual(recorder.missed_indices(), expected_missed(samples))
         self.assertEqual([r.index for r in recorder.responses], [0, 4, 5])
 
-    def test_scope_excludes_beats_outside_the_observed_span(self):
+    def test_scope_excludes_beats_the_run_never_observed(self):
         """A run that starts late or stops early is not blamed for either end."""
         samples = [1.2 + i / 60.0 for i in range(int(1.3 * 60))]   # 1.2 .. 2.5
         recorder = play(samples)
 
         scope = recorder.beats_in_scope()
-        self.assertNotIn(0, scope, "beat before the run began is not in scope")
-        self.assertNotIn(1, scope, "beat before the run began is not in scope")
-        self.assertNotIn(5, scope, "beat after the run stopped is not in scope")
+        self.assertNotIn(0, scope, "beat 0 was over before the run began")
+        self.assertNotIn(5, scope, "beat 5 came after the run stopped")
+        # Beat 1 fell just before the first sample but was still inside its
+        # response window when that sample landed, so it was genuinely caught.
+        self.assertIn(1, [r.index for r in recorder.responses])
+        self.assertIn(1, scope)
         self.assertEqual(recorder.missed_indices(), expected_missed(samples))
 
     def test_summary_reports_scope_alongside_coverage(self):
@@ -113,18 +116,48 @@ class TestMissedBeatAccounting(unittest.TestCase):
         self.assertEqual(summary["beats_missed"], 3)
         self.assertEqual(summary["beats_in_scope"], 6)
 
+    def test_a_beat_caught_near_the_end_is_still_counted_in_scope(self):
+        """A full run must never report more sampled than in scope."""
+        samples = [i / 60.0 for i in range(int(3.1 * 60))]   # ends 0.1 s after beat 5
+        recorder = play(samples)
+
+        summary = recorder.summary()
+        self.assertEqual(summary["beats_sampled"], 6)
+        self.assertGreaterEqual(summary["beats_in_scope"], summary["beats_sampled"])
+        self.assertEqual(summary["beats_missed"], 0)
+        self.assertEqual(recorder.missed_indices(), expected_missed(samples))
+
     def test_no_samples_at_all_is_not_a_crash(self):
         recorder = TimingRecorder(beat_times=BEATS, response_window=WINDOW)
         self.assertEqual(recorder.beats_in_scope(), [])
         self.assertEqual(recorder.beats_missed, 0)
         self.assertEqual(recorder.summary()["update_samples"], 0)
 
-    def test_recorder_without_beat_times_reports_no_scope(self):
-        """Coverage needs the beat list; without it nothing is claimed."""
+    def test_recorder_without_beat_times_claims_no_misses(self):
+        """Without the beat list nothing can be declared missed."""
         recorder = TimingRecorder()
         recorder.record_sample(state_at(1.02), observed_at=1.02, wall_time=1.02)
         self.assertEqual(recorder.beats_missed, 0)
-        self.assertEqual(recorder.summary()["beats_in_scope"], 0)
+        self.assertEqual(recorder.missed_indices(), [])
+
+    def test_sampled_never_exceeds_in_scope(self):
+        """The invariant behind a run once reporting "65 of 64"."""
+        schedules = [
+            [i / 60.0 for i in range(int(3.6 * 60))],
+            [i / 60.0 for i in range(int(3.1 * 60))],
+            [0.833 * i for i in range(1, 6)],
+            [0.0, 0.05, 3.6, 3.65],
+            [0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        ]
+        for samples in schedules:
+            summary = play(samples).summary()
+            with self.subTest(samples=len(samples)):
+                self.assertLessEqual(
+                    summary["beats_sampled"],
+                    summary["beats_in_scope"],
+                    f"reported {summary['beats_sampled']} of "
+                    f"{summary['beats_in_scope']} in scope",
+                )
 
 
 class TestClockSkewDiagnostic(unittest.TestCase):
