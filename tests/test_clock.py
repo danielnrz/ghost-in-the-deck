@@ -49,6 +49,9 @@ class FakeSound:
     def stop(self) -> None:
         self._status = self.STOPPED
 
+    def resume(self) -> None:
+        self._status = self.PLAYING
+
 
 class TestPlaybackClock(unittest.TestCase):
     def setUp(self):
@@ -97,12 +100,70 @@ class TestPlaybackClock(unittest.TestCase):
         wall.advance(3.25)
         self.assertAlmostEqual(clock.time(), 3.25, places=9)
 
-    def test_a_stopped_sound_still_yields_advancing_time(self):
+    def test_a_brief_status_blip_does_not_stall_musical_time(self):
+        """Panda3D cannot distinguish an underrun from a stop, so ride it out."""
         self.wall.advance(1.0)
         before = self.clock.time()
+
         self.sound.stop()
-        self.wall.advance(0.5)
-        self.assertGreaterEqual(self.clock.time(), before)
+        self.wall.advance(0.2)                 # inside the grace period
+        self.assertGreater(self.clock.time(), before)
+        self.assertFalse(self.clock.holding)
+
+        self.sound.resume()
+        self.wall.advance(0.2)
+        self.assertGreater(self.clock.time(), before + 0.3)
+
+    def test_time_holds_once_playback_has_definitively_stopped(self):
+        """The avatar must not dance on through a track nobody is hearing."""
+        self.wall.advance(1.0)
+        self.clock.time()
+
+        self.sound.stop()
+        self.wall.advance(self.clock.stopped_grace + 0.01)
+        held = self.clock.time()
+        self.assertTrue(self.clock.holding)
+
+        self.wall.advance(30.0)
+        self.assertEqual(self.clock.time(), held, "clock ran on past a stopped sound")
+
+    def test_holding_is_false_during_normal_playback(self):
+        self.wall.advance(5.0)
+        self.clock.time()
+        self.assertFalse(self.clock.holding)
+
+    def test_a_silent_run_is_never_treated_as_stopped(self):
+        """--no-audio has no sound to report a status; the wall clock rules."""
+        wall = FakeWall()
+        clock = PlaybackClock(None, wall=wall)
+        clock.start()
+        wall.advance(10.0)
+        self.assertFalse(clock.holding)
+        self.assertAlmostEqual(clock.time(), 10.0, places=9)
+
+    def test_a_long_block_while_playing_still_advances(self):
+        """The Phase 0.1 fix must survive the stopped-audio rule.
+
+        The sound stays PLAYING through a blocked loop, so the grace period is
+        never reached and extrapolation carries musical time across the freeze.
+        """
+        self.wall.advance(1.2)                 # loop blocked, status still PLAYING
+        self.assertAlmostEqual(self.clock.time(), 1.2, places=9)
+        self.assertFalse(self.clock.holding)
+
+        self.sound.refresh(1.204)              # audio task finally catches up
+        self.assertAlmostEqual(self.clock.time(), 1.204, places=9)
+
+    def test_recovery_after_holding_resumes_from_the_held_position(self):
+        self.wall.advance(1.0)
+        self.clock.time()
+        self.sound.stop()
+        self.wall.advance(self.clock.stopped_grace + 5.0)
+        held = self.clock.time()
+
+        self.sound.resume()
+        self.sound.refresh(1.05)
+        self.assertGreaterEqual(self.clock.time(), held)
 
     def test_start_resets_the_position(self):
         self.wall.advance(5.0)
