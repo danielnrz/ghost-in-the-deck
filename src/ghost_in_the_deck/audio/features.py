@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -25,12 +25,30 @@ class MusicFeatures:
     hop_length: int
     bpm: float
     beats: list[float]
+    # RMS at the loudest point, before the envelopes were normalised. The
+    # envelopes alone cannot tell a quiet recording from a loud one, because
+    # each is scaled to its own peak; this is what lets a near-silent passage be
+    # recognised as near-silent rather than as "quiet relative to itself".
+    # 0.0 means unknown, which is how features written before schema 2 read.
+    peak_rms: float = 0.0
     frame_times: list[float] = field(default_factory=list)
     onset_strength: list[float] = field(default_factory=list)
     rms: list[float] = field(default_factory=list)
     bass_energy: list[float] = field(default_factory=list)
     mid_energy: list[float] = field(default_factory=list)
     high_energy: list[float] = field(default_factory=list)
+
+    @property
+    def has_absolute_loudness(self) -> bool:
+        """Whether an absolute loudness reference was recorded."""
+        return self.peak_rms > 0.0
+
+    def absolute_rms(self, index: int) -> float:
+        """RMS at a frame in the original recording's own scale."""
+        if not self.has_absolute_loudness or not self.rms:
+            return 0.0
+        index = max(0, min(index, len(self.rms) - 1))
+        return float(self.rms[index]) * self.peak_rms
 
     @property
     def beat_interval(self) -> float:
@@ -56,6 +74,7 @@ class MusicFeatures:
             "sample_rate": self.sample_rate,
             "hop_length": self.hop_length,
             "bpm": round(self.bpm, 2),
+            "peak_rms": round(self.peak_rms, 9),
             "beat_count": len(self.beats),
             "beats": [round(t, 4) for t in self.beats],
             "frame_times": [round(t, 4) for t in self.frame_times],
@@ -75,6 +94,7 @@ class MusicFeatures:
             hop_length=int(data["hop_length"]),
             bpm=float(data["bpm"]),
             beats=[float(t) for t in data["beats"]],
+            peak_rms=float(data.get("peak_rms", 0.0)),
             frame_times=[float(t) for t in data.get("frame_times", [])],
             onset_strength=[float(v) for v in data.get("onset_strength", [])],
             rms=[float(v) for v in data.get("rms", [])],

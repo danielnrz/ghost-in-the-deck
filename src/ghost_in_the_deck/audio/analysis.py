@@ -70,6 +70,7 @@ def analyse(path: Path | str, sample_rate: int = ANALYSIS_SAMPLE_RATE) -> MusicF
 
     return MusicFeatures(
         track=source.name,
+        peak_rms=float(np.max(rms)) if rms.size else 0.0,
         duration_seconds=duration,
         sample_rate=sr,
         hop_length=HOP_LENGTH,

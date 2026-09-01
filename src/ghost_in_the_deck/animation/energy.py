@@ -16,6 +16,8 @@ not whether this is a build-up, a drop or a breakdown.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from ..audio.features import MusicFeatures
@@ -34,6 +36,41 @@ SMOOTHING_SECONDS = 1.5
 LOW_PERCENTILE = 5.0
 HIGH_PERCENTILE = 95.0
 
+# Absolute RMS, in the recording's own scale, between "inaudible" and "clearly
+# audible". Rescaling against a track's own range is what makes a quiet
+# recording still reach full intensity, but taken alone it cannot tell quiet
+# music from silence: a flat envelope of 1e-12 normalises to exactly the same
+# curve as a flat envelope of 0.5, and the avatar would groove at medium
+# strength to nothing at all. This gate is the absolute reference that stops
+# that, and it fades in smoothly so there is no step anywhere.
+#
+# For scale: the seven local test tracks measure 0.20 to 0.39, a -40 dBFS sine
+# measures 0.0043, and a 1e-6 amplitude signal measures 0.000013.
+SILENCE_RMS = 1.0e-4
+AUDIBLE_RMS = 5.0e-3
+
+
+def _smoothstep(value: float | np.ndarray) -> np.ndarray:
+    """Clamped 0..1 ease with zero slope at both ends."""
+    clamped = np.clip(value, 0.0, 1.0)
+    return clamped * clamped * (3.0 - 2.0 * clamped)
+
+
+def _smooth(values: np.ndarray, features: MusicFeatures, seconds: float) -> np.ndarray:
+    """Edge-padded moving average, so the intro and outro are not dragged
+    towards zero by an implicit silent surround."""
+    frames = values.size
+    step = 0.0
+    if len(features.frame_times) >= 2:
+        step = float(features.frame_times[1] - features.frame_times[0])
+    width = max(1, int(round(seconds / step))) if step > 0 else 1
+    if width <= 1:
+        return values
+    pad = width // 2
+    padded = np.pad(values, pad, mode="edge")
+    kernel = np.ones(width) / width
+    return np.convolve(padded, kernel, mode="same")[pad : pad + frames]
+
 
 class EnergyTrack:
     """Smoothed 0..1 intensity, addressable by absolute playback time."""
@@ -46,6 +83,7 @@ class EnergyTrack:
         self.features = features
         self._times = np.asarray(features.frame_times, dtype=float)
         self._values = self._build(features, smoothing_seconds)
+        self._values = self._values * self._audibility(features, smoothing_seconds)
 
         if self._times.size >= 2:
             self._step = float(self._times[1] - self._times[0])
@@ -68,18 +106,7 @@ class EnergyTrack:
         if not np.any(combined):
             return np.zeros(frames)
 
-        step = 0.0
-        if frames >= 2:
-            step = float(features.frame_times[1] - features.frame_times[0])
-        width = max(1, int(round(smoothing_seconds / step))) if step > 0 else 1
-
-        if width > 1:
-            # Edge-padded moving average, so the intro and outro are not dragged
-            # towards zero by an implicit silent surround.
-            pad = width // 2
-            padded = np.pad(combined, pad, mode="edge")
-            kernel = np.ones(width) / width
-            combined = np.convolve(padded, kernel, mode="same")[pad : pad + frames]
+        combined = _smooth(combined, features, smoothing_seconds)
 
         low = float(np.percentile(combined, LOW_PERCENTILE))
         high = float(np.percentile(combined, HIGH_PERCENTILE))
@@ -87,6 +114,28 @@ class EnergyTrack:
             return np.full(frames, 0.5)
 
         return np.clip((combined - low) / (high - low), 0.0, 1.0)
+
+    @staticmethod
+    def _audibility(features: MusicFeatures, smoothing_seconds: float) -> np.ndarray:
+        """Per-frame 0..1 gate from how loud the recording actually was.
+
+        Returns all ones when no absolute reference was recorded, so features
+        written before the loudness statistic existed behave as they did.
+        """
+        frames = len(features.frame_times)
+        if frames == 0:
+            return np.ones(0)
+        if not features.has_absolute_loudness:
+            return np.ones(frames)
+
+        rms = np.asarray(features.rms, dtype=float)
+        if rms.size != frames:
+            return np.ones(frames)
+
+        absolute = _smooth(rms * features.peak_rms, features, smoothing_seconds)
+        floor, ceiling = math.log10(SILENCE_RMS), math.log10(AUDIBLE_RMS)
+        loudness = np.log10(np.maximum(absolute, 1e-12))
+        return _smoothstep((loudness - floor) / (ceiling - floor))
 
     def at(self, time: float) -> float:
         """Intensity at ``time``, in 0..1. Constant outside the analysed range."""

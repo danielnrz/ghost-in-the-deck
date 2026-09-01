@@ -17,6 +17,7 @@ is correct for the moment it is drawn.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from .animation.groove import GrooveEngine
 from .animation.rig import AvatarRig
 from .audio.analysis import analyse
 from .audio.decode import to_wav
-from .audio.features import MusicFeatures
+from .audio.features import SCHEMA_VERSION, MusicFeatures
 from .audio.library import DEFAULT_MUSIC_DIR, choose_track
 from .clock import PlaybackClock
 from .sync import TimingRecorder
@@ -39,11 +40,25 @@ ANALYSIS_DIR = ROOT / "out" / "analysis"
 REPORT_DIR = ROOT / "out"
 
 
+def positive_int(value: str) -> int:
+    """argparse type for counts that are used as a divisor."""
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or greater, got {number}")
+    return number
+
+
 def load_features(track: Path, refresh: bool = False) -> MusicFeatures:
-    """Analysis is done once per track and cached; playback never waits on it."""
+    """Analysis is done once per track and cached; playback never waits on it.
+
+    A cache written by an older schema is re-analysed rather than loaded, since
+    it predates fields the groove now needs.
+    """
     cached = ANALYSIS_DIR / f"{track.stem}.json"
     if cached.is_file() and not refresh:
-        return MusicFeatures.load(cached)
+        stored = json.loads(cached.read_text())
+        if int(stored.get("schema_version", 0)) >= SCHEMA_VERSION:
+            return MusicFeatures.from_dict(stored)
     features = analyse(track)
     features.save(cached)
     return features
@@ -211,7 +226,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--debug-every",
-        type=int,
+        type=positive_int,
         default=30,
         metavar="N",
         help="print one debug line every N update samples (default 30)",

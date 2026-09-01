@@ -15,6 +15,7 @@ before, which is what lets the renderer stall without the music falling behind.
 
 from __future__ import annotations
 
+import math
 from bisect import bisect_right
 from dataclasses import dataclass
 
@@ -128,56 +129,75 @@ class BeatTimeline:
     def phase_at(self, time: float) -> BeatPhase:
         """Continuous rhythmic position at ``time``.
 
+        Outside the detected beats the grid is extended at the nominal interval,
+        so an intro or an outro still has a pulse to move to. Those virtual beats
+        carry real indices - negative before the first detected beat, continuing
+        upwards after the last - which is what keeps the bar continuous across
+        them. Pinning the index at -1 through the whole intro, as this used to,
+        made bar phase jump every time the virtual beat rolled over, and the
+        whole body twitched with it.
+
+        ``index`` is therefore only a beat number on the detected grid when it
+        falls in ``0 .. len(self) - 1``; outside that range it names a virtual
+        beat. Callers that care use ``has_beat`` or ``cue_before``.
+
         Stateless like the rest of the timeline: the answer depends only on the
-        time asked about. Before the first beat and after the last one the grid
-        is extrapolated at the nominal interval, so the avatar keeps moving
-        through an intro or an outro rather than standing still.
+        time asked about.
         """
         nominal = self.nominal_interval
+
         if not self._times:
-            phase = (time / nominal) % 1.0 if nominal > 0 else 0.0
+            position = time / nominal if nominal > 0 else 0.0
+            index = math.floor(position)
+            phase = position - index
+            previous = index * nominal
             return BeatPhase(
-                index=-1,
+                index=index,
                 phase=phase,
                 interval=nominal,
-                previous_time=time - phase * nominal,
-                next_time=time + (1.0 - phase) * nominal,
+                previous_time=previous,
+                next_time=previous + nominal,
             )
 
         index = self.index_before(time)
 
-        if index < 0:                       # before the first beat
+        if index < 0:
+            # Before the first detected beat: continue the grid backwards.
             first = self._times[0]
-            behind = (first - time) / nominal
-            phase = (1.0 - (behind % 1.0)) % 1.0
+            position = (time - first) / nominal
+            step = math.floor(position)
+            phase = position - step
+            previous = first + step * nominal
             return BeatPhase(
-                index=-1,
+                index=step,
                 phase=phase,
                 interval=nominal,
-                previous_time=time - phase * nominal,
-                next_time=time + (1.0 - phase) * nominal,
+                previous_time=previous,
+                next_time=previous + nominal,
             )
 
         previous = self._times[index]
         if index + 1 < len(self._times):
             following = self._times[index + 1]
-        else:                               # past the last beat
+        else:
             following = previous + nominal
 
         interval = following - previous
         if interval <= 0:
             interval = nominal
-        phase = (time - previous) / interval
-        if phase >= 1.0:                    # only reachable past the last beat
-            whole = int(phase)
-            index += whole
-            previous += whole * interval
+        position = (time - previous) / interval
+
+        if position >= 1.0:
+            # Past the last detected beat: continue the grid forwards.
+            step = math.floor(position)
+            index += step
+            previous += step * interval
             following = previous + interval
-            phase -= whole
+            position -= step
 
         return BeatPhase(
             index=index,
-            phase=min(max(phase, 0.0), 1.0),
+            phase=min(max(position, 0.0), 1.0),
             interval=interval,
             previous_time=previous,
             next_time=following,

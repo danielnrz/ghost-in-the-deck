@@ -73,11 +73,17 @@ def make_features(
     step = 0.05
     frames = [i * step for i in range(int(duration / step))]
     if energy is None:
-        ones = [1.0] * len(frames)
+        raw = [1.0] * len(frames)
     elif callable(energy):
-        ones = [float(energy(t)) for t in frames]
+        raw = [float(energy(t)) for t in frames]
     else:
-        ones = [float(energy)] * len(frames)
+        raw = [float(energy)] * len(frames)
+
+    # Analysis normalises every envelope to its own peak and records the true
+    # peak separately, so the fixture has to do the same or the absolute
+    # loudness gate would see a doubly-scaled signal.
+    peak = max(raw) if raw else 0.0
+    ones = [v / peak for v in raw] if peak > 0 else list(raw)
     return MusicFeatures(
         track="synthetic",
         duration_seconds=duration,
@@ -85,6 +91,7 @@ def make_features(
         hop_length=512,
         bpm=bpm,
         beats=list(beats),
+        peak_rms=peak,
         frame_times=frames,
         onset_strength=ones,
         rms=ones,

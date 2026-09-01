@@ -39,7 +39,7 @@ PULSE_DECAY = 0.16
 # Seconds for the accent to rise. Without it the accent steps from nothing to
 # full between two consecutive samples, which shows up as the head snapping
 # rather than nodding. A body has inertia; this is the cheapest way to say so.
-PULSE_ATTACK = 0.045
+PULSE_ATTACK = 0.055
 
 # Movement never stops entirely, even in the quietest passage.
 MIN_INTENSITY = 0.35
