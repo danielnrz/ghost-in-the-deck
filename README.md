@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 1A**.
+This repository is currently at **Phase 1B**.
 
 ## Phase 0 scope
 
@@ -31,18 +31,19 @@ MusicFeatures       audio/features.py    plain data - no librosa, no Panda3D
       +--> BeatTimeline    animation/cues.py     beats and beat phase
       +--> EnergyTrack     animation/energy.py   smoothed intensity
       |
-GrooveEngine        animation/groove.py  what the body is doing at time T
+GrooveEngine        animation/groove.py  how the body feels the music at time T
+      |                                    (beat phase, energy, sway, weight...)
+DJBehaviorEngine     animation/dj_behavior.py  what the DJ is occasionally doing
+      |                                        (deck_glance, lean_in, ...)
+Animation Ctrl       animation/controller.py   groove + action -> joint angles
       |
-GrooveState                              beat phase, energy, sway, weight...
-      |
-Animation Ctrl      animation/controller.py   groove -> joint angles
-      |
-3D Avatar           animation/rig.py     the only module that touches bones
+3D Avatar            animation/rig.py     the only module that touches bones
 ```
 
-`GrooveEngine` is the seam the DJ behaviour engine will grow into. It already
-answers "what is the body doing right now"; later it will also answer "and what
-is the DJ reaching for".
+`GrooveEngine` and `DJBehaviorEngine` answer two different questions on
+purpose - "how does the body feel the beat" and "is the DJ doing something
+right now" - so a real DJ intelligence layer can replace or extend the second
+one later without the first ever needing to change.
 
 ## Body language (Phase 1A)
 
@@ -126,7 +127,7 @@ writes front, side and three-quarter views to `out/stance_review/`.
 Joint limits in `AvatarRig.LIMITS` bound how far each joint may move from that
 rest pose, and are enforced in the rig so nothing upstream can exceed them.
 
-## Timing model## Timing model
+## Timing model
 
 The playback clock is the authority for musical progress, not the renderer.
 
@@ -232,7 +233,8 @@ the individual groove layers.
 
 Useful flags: `--headless` (render offscreen), `--no-audio` (silent run),
 `--refresh` (re-analyse), `--seconds N` (stop early),
-`--debug-every N` (debug print frequency).
+`--debug-every N` (debug print frequency), `--no-actions` (groove only, as in
+Phase 1A, for comparison).
 
 To watch stall recovery directly, freeze the update loop on purpose:
 
@@ -243,6 +245,58 @@ PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app \
 
 Beats inside each freeze are reported as missed, while state lag stays near
 zero - the loop misses samples, the music does not drift.
+
+## DJ actions and the workstation (Phase 1B)
+
+The avatar now stands at a small procedural DJ workstation - a table, two deck
+platters and a mixer strip with a few knobs and faders - and occasionally does
+something a DJ does on top of the continuous groove: glances at the deck, leans
+in, reaches a hand toward a platter, or lifts into a small energetic accent.
+
+**The workstation's layout lives in one place.** `animation/workstation.py`
+defines `DJWorkstationTargets` - plain `(x, y, z)` tuples, no Panda3D - and
+`scene/workstation.py` builds the actual geometry from those same numbers. The
+behaviour layer reads the same targets to decide where to look and reach, so
+the table can never drift out of sync with what the avatar is aiming at.
+
+**"How the body feels the beat" and "what the DJ is doing" are kept apart.**
+`GrooveEngine` still answers the first question continuously. `DJBehaviorEngine`
+answers the second only occasionally: it builds a deterministic gesture
+schedule once from the analysed track - a list of `GestureEvent`s, each with a
+start time, a duration and a kind - and `state_at(T)` finds the one covering
+`T` by binary search, the same stateless pattern `BeatTimeline` already uses.
+Selection is a hash of the track's own seed and the bar number (not `hash()`,
+which is salted per process and would give a different show every run), and it
+leans on the same smoothed energy curve the groove uses: restrained passages
+favour a deck glance, energetic ones occasionally allow a small hype accent,
+and a gesture never fires more than once every few bars.
+
+**Composition is intentional, not just additive.** A gesture's own offsets are
+scaled by an attack-hold-release envelope that is exactly zero at both ends, so
+nothing jumps when a gesture starts or stops. Wherever a gesture and the groove
+would otherwise fight for the same joint - a beat's downward nod during a deck
+glance, for instance - the groove's contribution to *that joint only* is
+damped in proportion to the gesture's own weight. Every other joint, most of
+the time the legs and the arm not being used, keeps the groove at full
+strength: that is what "the groove continues underneath a gesture" means
+concretely.
+
+Review the gestures without waiting for the schedule to produce one:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app --show-action lean_in
+PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app --show-action hand_to_deck --show-side r
+```
+
+loops one gesture on repeat, with the groove still running underneath it, in a
+real window. Or render still frames of all four:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/render_actions.py
+```
+
+writes a neutral reference, front and three-quarter views of every gesture, and
+one wide establishing shot, to `out/action_review/`.
 
 ## Tests
 
@@ -256,13 +310,18 @@ an empty `testMusic/` gets a full result. The checks against your own library ar
 an optional extra and skip when there is nothing there.
 
 Coverage: audio analysis, the exported avatar's mesh and skeleton, timeline
-lookup, the playback clock, timing statistics, and a pixel comparison of rendered
-frames proving the movement is actually visible.
+lookup, the playback clock, timing statistics, gesture scheduling and pose
+composition, and a pixel comparison of rendered frames proving the movement is
+actually visible.
 
-`test_timing.py` is the render-stall suite. It drives the real timeline and
-animator through 60/30/15/5 fps schedules and through 250 ms, 500 ms and 1 s
-stalls, asserting the pose at a playback time is identical however many frames
-preceded it.
+`test_timing.py` is the render-stall suite for the groove. It drives the real
+timeline and animator through 60/30/15/5 fps schedules and through 250 ms,
+500 ms and 1 s stalls, asserting the pose at a playback time is identical
+however many frames preceded it. `test_dj_behavior.py` does the same for the
+gesture layer, and adds world-space checks - feet stay planted, a deck glance
+moves the head down, a hand-to-deck reach moves toward the table, a hype
+gesture moves away from it - because Phase 1A already showed that a correct
+joint angle can still move the mesh the wrong way if its pivot is wrong.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
@@ -287,18 +346,25 @@ Two format notes, both learned the hard way:
 
 ## Known limitations
 
-- No DJ behaviour exists yet. The avatar grooves to the music but does not do
-  anything a DJ does: no booth, no controls, no gestures.
-- Bars are assumed to be four beats. A track in another metre still grooves, but
-  the slow layers land on the wrong subdivision.
+- The gesture vocabulary is small and does not yet do anything to the audio
+  itself - no knob contact, no fader movement, no EQ, no crossfading. See the
+  recommendation at the end of the Phase 1B report for what that implies for
+  what comes next.
+- `hand_to_deck` does not use IK. It rotates the shoulder and elbow toward the
+  deck by a fixed amount; it does not solve for the hand actually landing on
+  the platter, and does not adapt to a different workstation layout.
+- Gesture selection reasons about relative energy and a short trend, not real
+  musical structure. It has no idea what a build-up, a drop or a breakdown is.
+- Bars are assumed to be four beats. A track in another metre still grooves,
+  and gestures still land on a bar boundary, but the wrong one.
 - Before the first detected beat and after the last, the beat grid is
   extrapolated at the nominal interval with virtual beat indices, so an intro
-  still grooves. Those indices are not real beats; `has_beat` and `cue_before`
-  are what distinguish them.
-- Leg movement is deliberately small. The feet are planted and there is no IK, so
-  anything larger reads as sliding.
-- Leg movement is small because the pelvis is the animation root: bending a knee
-  moves the foot rather than lowering the body. Planted feet would need IK.
+  still grooves. Those indices are not real beats; `has_detected_beat` and
+  `cue_before` are what distinguish them, not the sign of the index.
+- Leg movement is deliberately small. The pelvis is the animation root, so
+  bending a knee moves the foot rather than lowering the body; anything larger
+  than the current small amount reads as sliding, and would need real IK to
+  keep the feet planted.
 - Beat detection is whole-track and fixed-tempo. Tracks that change tempo, and
   the quieter intros of some tracks, will drift.
 - Analysis runs before playback. There is no live or microphone input.
@@ -315,5 +381,4 @@ Two format notes, both learned the hard way:
 - Frame delivery on a Wayland compositor varies with display state. The same
   build has been measured at both 166 fps and under 2 fps on this machine
   depending on whether the surface was actually being composited.
-- The exported skin is a plain solid material. MPFB's detailed skins need asset
   packs that are not part of the add-on.

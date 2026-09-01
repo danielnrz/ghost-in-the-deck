@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from ghost_in_the_deck.animation.dj_behavior import DJBehaviorEngine
 from ghost_in_the_deck.animation.groove import GrooveEngine
 from ghost_in_the_deck.audio.features import MusicFeatures
 
@@ -162,3 +163,17 @@ class SampleState:
     @property
     def has_beat(self) -> bool:
         return self.has_detected_beat
+
+
+def behavior_for(
+    beats=None,
+    duration: float = 120.0,
+    bpm: float = 120.0,
+    seed: str = "test",
+    energy=None,
+) -> DJBehaviorEngine:
+    """A DJBehaviorEngine over a known beat grid, for gesture-scheduling tests."""
+    if beats is None:
+        beats = regular_beats(bpm=bpm, count=int(duration / (60.0 / bpm)))
+    features = make_features(beats, duration=duration, bpm=bpm, energy=energy)
+    return DJBehaviorEngine(features, seed=seed)
