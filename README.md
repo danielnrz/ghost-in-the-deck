@@ -65,6 +65,13 @@ activity, rescaled against **the track's own** dynamic range so a quiet recordin
 still reaches full intensity in its loudest passage. Movement never stops
 entirely: quiet passages are restrained, not frozen.
 
+Relative scaling alone cannot tell quiet music from silence, though - a flat
+envelope of 1e-12 normalises to exactly the same curve as a flat envelope of 0.5.
+Analysis therefore also records `peak_rms`, the loudness of the track before the
+envelopes were normalised, and the groove fades movement out below it. Silence
+and a barely-there signal both settle at the resting intensity, and everything in
+between ramps smoothly.
+
 Variation is deterministic. Per-bar character - emphasis, head bias, which
 shoulder works harder, which leg takes the weight - comes from a crc32 of the
 track name and bar number, eased across the bar so nothing snaps at the bar line.
@@ -74,20 +81,50 @@ same way at the same moment.
 
 ### The neutral stance
 
-Applied at runtime, in `AvatarRig.NEUTRAL_POSE`, rather than baked into the GLB.
+The avatar's relaxed standing pose is **baked into the asset** by the Blender
+script, not applied at runtime. `AvatarRig.NEUTRAL_POSE` is empty; the runtime
+composition is
 
-That choice was deliberate. The stance and the movement then share one coordinate
-convention and one iteration loop, it composes additively with the DJ gestures
-that come next, and the exported mesh and its bind weights stay untouched. The
-angles were found by rendering candidates rather than by geometry alone: the
-values a solver picks for a perfectly vertical arm are large enough that the
-linear-blend skin splays the shoulder into a wing.
+```
+asset's own rest pose  +  groove  +  future gestures
+```
 
-The trade-off: the GLB on disk is still an A-pose asset, so an external viewer
-shows an A-pose. Nothing in this project reads it that way.
+Phase 1A applied the stance as a large runtime correction on top of the A-pose
+the asset was bound in, and it looked wrong - splayed shoulders, elbows winged
+out, hands floating beside the waist. The cause was not the correction itself.
 
-Joint limits in `AvatarRig.LIMITS` bound how far each joint may move *from* the
-neutral stance, and are enforced in the rig so nothing upstream can exceed them.
+**MPFB builds the game-engine rig in a space whose origin is at the hips, while
+placing the body with its feet on the ground.** The whole skeleton therefore sat
+about 0.86 m below the geometry it deforms: the `head` joint was at waist
+height, `foot_l` was below the floor. At rest that is invisible, because the
+deformation is the identity - but every bone then rotated about a pivot most of
+a metre away from the joint it represents, so rotations smeared the mesh
+sideways instead of bending it. Small angles looked merely odd; the stance's
+larger ones destroyed the silhouette.
+
+`make_avatar.py` now measures that offset by comparing each bone against the
+centre of the vertices weighted to it, takes the median across all of them, and
+moves the bones onto the body. The mesh does not move - only the pivots become
+correct. The offset is measured rather than hard-coded so it keeps working if
+MPFB changes its numbers, and `verify()` fails the build if the rig ever drifts
+off the mesh again.
+
+With correct pivots the stance itself is then posed by aiming bones at target
+directions and baking the result as the new rest pose: duplicate the armature
+modifier, apply the first copy so the vertices move to where they are drawn,
+then make the pose the rest pose. The surviving duplicate re-binds the baked
+mesh, so at rest it deforms by nothing.
+
+To review the stance yourself:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/render_stance.py
+```
+
+writes front, side and three-quarter views to `out/stance_review/`.
+
+Joint limits in `AvatarRig.LIMITS` bound how far each joint may move from that
+rest pose, and are enforced in the rig so nothing upstream can exceed them.
 
 ## Timing model## Timing model
 
@@ -254,9 +291,14 @@ Two format notes, both learned the hard way:
   anything a DJ does: no booth, no controls, no gestures.
 - Bars are assumed to be four beats. A track in another metre still grooves, but
   the slow layers land on the wrong subdivision.
+- Before the first detected beat and after the last, the beat grid is
+  extrapolated at the nominal interval with virtual beat indices, so an intro
+  still grooves. Those indices are not real beats; `has_beat` and `cue_before`
+  are what distinguish them.
 - Leg movement is deliberately small. The feet are planted and there is no IK, so
   anything larger reads as sliding.
-- The neutral stance is a runtime correction; the exported GLB is still A-pose.
+- Leg movement is small because the pelvis is the animation root: bending a knee
+  moves the foot rather than lowering the body. Planted feet would need IK.
 - Beat detection is whole-track and fixed-tempo. Tracks that change tempo, and
   the quieter intros of some tracks, will drift.
 - Analysis runs before playback. There is no live or microphone input.
