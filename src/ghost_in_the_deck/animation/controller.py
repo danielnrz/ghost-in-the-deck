@@ -14,7 +14,10 @@ GrooveState and writes joint offsets to an AvatarRig, which clamps them.
 
 from __future__ import annotations
 
+from . import gesture_pose
+from .dj_behavior import DJActionState, DJBehaviorEngine
 from .groove import GrooveEngine, GrooveState
+from .workstation import DEFAULT_TARGETS, DJWorkstationTargets
 
 # ---------------------------------------------------------------------- gains
 # Peak degrees at full intensity. Kept together so the body can be retuned in
@@ -56,11 +59,27 @@ ASYMMETRY = 0.25
 
 
 class AvatarAnimator:
-    """Evaluates the pose for a playback time and writes it to the rig."""
+    """Evaluates the pose for a playback time and writes it to the rig.
 
-    def __init__(self, rig, groove: GrooveEngine | None = None):
+    When a ``behavior`` engine is supplied, the final pose composes three
+    layers: the asset's own baked neutral stance (in the rig), the continuous
+    groove, and an occasional intentional DJ action on top. See
+    ``gesture_pose``'s module docstring for exactly how the last two combine -
+    it is not plain addition, because a beat landing mid-gesture can otherwise
+    fight the gesture rather than accent it.
+    """
+
+    def __init__(
+        self,
+        rig,
+        groove: GrooveEngine | None = None,
+        behavior: DJBehaviorEngine | None = None,
+        targets: DJWorkstationTargets = DEFAULT_TARGETS,
+    ):
         self.rig = rig
         self.groove = groove
+        self.behavior = behavior
+        self.targets = targets
 
     @property
     def response_window(self) -> float:
@@ -70,20 +89,26 @@ class AvatarAnimator:
     def state_at(self, time: float) -> GrooveState | None:
         return self.groove.state_at(time) if self.groove else None
 
+    def action_at(self, time: float) -> DJActionState | None:
+        return self.behavior.state_at(time) if self.behavior else None
+
     def apply_at(self, time: float) -> GrooveState | None:
         """Evaluate the pose for ``time`` and write it to the rig."""
         state = self.state_at(time)
         if state is None:
             self.rig.reset()
             return None
-        self._write_pose(state)
+        action = self.action_at(time)
+        self._write_pose(state, action)
         return state
 
     def reset(self) -> None:
         """Neutral stance with no movement on top."""
         self.rig.reset()
 
-    def pose_offsets(self, state: GrooveState) -> dict[str, tuple[float, float, float]]:
+    def pose_offsets(
+        self, state: GrooveState, action: DJActionState | None = None
+    ) -> dict[str, tuple[float, float, float]]:
         """The movement as joint -> (heading, pitch, roll), measured from neutral.
 
         The neutral stance itself lives in the rig, so these are purely the
@@ -153,8 +178,21 @@ class AvatarAnimator:
         add("calf_l", pitch=knee - carry)
         add("calf_r", pitch=knee + carry)
 
-        return {name: (v[0], v[1], v[2]) for name, v in offsets.items()}
+        groove = {name: (v[0], v[1], v[2]) for name, v in offsets.items()}
+        if action is None or not action.is_active:
+            return groove
 
-    def _write_pose(self, state: GrooveState) -> None:
-        for name, (heading, pitch, roll) in self.pose_offsets(state).items():
+        damping = gesture_pose.groove_damping(action)
+        gesture = gesture_pose.pose_offsets(action, self.targets)
+
+        composed: dict[str, tuple[float, float, float]] = {}
+        for joint in set(groove) | set(gesture):
+            gh, gp, gr = groove.get(joint, (0.0, 0.0, 0.0))
+            factor = damping.get(joint, 1.0)
+            ah, ap, ar = gesture.get(joint, (0.0, 0.0, 0.0))
+            composed[joint] = (gh * factor + ah, gp * factor + ap, gr * factor + ar)
+        return composed
+
+    def _write_pose(self, state: GrooveState, action: DJActionState | None = None) -> None:
+        for name, (heading, pitch, roll) in self.pose_offsets(state, action).items():
             self.rig.set_offset(name, heading=heading, pitch=pitch, roll=roll)
