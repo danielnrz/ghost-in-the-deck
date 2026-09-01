@@ -126,6 +126,23 @@ class BeatTimeline:
     def cue(self, index: int) -> MotionCue:
         return self._cues[index]
 
+    def beat_time(self, index: int) -> float:
+        """Absolute playback time of beat ``index``, real or virtual.
+
+        Uses the same nominal-interval extrapolation as ``phase_at`` outside the
+        detected range, so a beat index and a time computed from it agree with
+        what ``phase_at`` reports for that same beat. Used by anything that
+        needs to name a time from a beat count - the gesture scheduler wants
+        "the start of bar N" without duplicating this extrapolation itself.
+        """
+        if not self._times:
+            return index * self.nominal_interval
+        if 0 <= index < len(self._times):
+            return self._times[index]
+        if index < 0:
+            return self._times[0] + index * self.nominal_interval
+        return self._times[-1] + (index - (len(self._times) - 1)) * self.nominal_interval
+
     @property
     def nominal_interval(self) -> float:
         """Typical seconds between beats, for extrapolating outside the beats."""
