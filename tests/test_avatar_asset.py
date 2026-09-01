@@ -126,6 +126,84 @@ class TestBamRuntimeAsset(unittest.TestCase):
         self.rig.force_update()
         self.assertAlmostEqual((head.getPos(self.base.render) - rest).length(), 0.0, places=4)
 
+    # ------------------------------------------------------- neutral stance
+    def test_skeleton_sits_on_the_mesh_it_deforms(self):
+        """Every joint must be inside the body part it drives.
+
+        MPFB builds the rig in a hips-at-origin space while placing the body
+        feet-on-ground, which left the whole skeleton about 0.86 m below the
+        geometry. At rest that is invisible, but each bone then rotates about a
+        pivot most of a metre from the joint it represents, which smears the
+        mesh sideways instead of bending it. The generator corrects for it; this
+        is the guard that it stays corrected.
+        """
+        low, high = self.rig.actor.getTightBounds()
+        height = high.z - low.z
+        self.assertGreater(height, 1.2)
+
+        def fraction(joint):
+            return (self.rig.expose(joint).getPos(self.base.render).z - low.z) / height
+
+        self.rig.reset()
+        self.rig.force_update()
+        expected = {
+            "head": (0.85, 1.00),
+            "neck_01": (0.80, 0.95),
+            "upperarm_l": (0.72, 0.90),
+            "pelvis": (0.45, 0.62),
+            "thigh_l": (0.45, 0.62),
+            "foot_l": (0.00, 0.15),
+        }
+        for joint, (lowest, highest) in expected.items():
+            place = fraction(joint)
+            self.assertTrue(
+                lowest <= place <= highest,
+                f"{joint} sits at {place:.2f} of body height, expected {lowest}-{highest}",
+            )
+
+    def test_bind_pose_stands_with_the_arms_down(self):
+        """The asset's own rest pose, with nothing applied on top."""
+        import math
+
+        from panda3d.core import Vec3
+
+        self.rig.reset()
+        self.rig.force_update()
+        shoulder = self.rig.expose("upperarm_l").getPos(self.base.render)
+        elbow = self.rig.expose("lowerarm_l").getPos(self.base.render)
+        hand = self.rig.expose("hand_l").getPos(self.base.render)
+        hip = self.rig.expose("thigh_l").getPos(self.base.render)
+
+        upper = elbow - shoulder
+        upper.normalize()
+        fore = hand - elbow
+        fore.normalize()
+
+        def angle(a, b):
+            return math.degrees(math.acos(max(-1.0, min(1.0, a.dot(b)))))
+
+        down = Vec3(0, 0, -1)
+        self.assertLess(angle(upper, down), 20.0, "upper arm is still abducted")
+        self.assertLess(angle(fore, down), 35.0, "forearm does not hang")
+        bend = angle(upper, fore)
+        self.assertTrue(3.0 < bend < 40.0, f"elbow bend of {bend:.1f} deg is not relaxed")
+
+        self.assertLess(abs(hand.x - hip.x), 0.18, "hand floats away from the thigh")
+        self.assertLess(abs(hand.z - hip.z), 0.20, "hand is not near hip height")
+
+    def test_no_runtime_neutral_correction_is_applied(self):
+        """The stance is in the asset, so nothing may re-apply it at runtime."""
+        from ghost_in_the_deck.animation.rig import AvatarRig as Rig
+
+        self.assertEqual(
+            Rig.NEUTRAL_POSE, {},
+            "a runtime neutral pose would be applied on top of the baked one",
+        )
+        self.rig.reset()
+        for joint in self.rig.CONTROLLED:
+            for value in self.rig.offset_of(joint):
+                self.assertAlmostEqual(value, 0.0, places=6, msg=joint)
+
     def test_animator_drives_the_rig_from_the_groove(self):
         """A beat must produce movement, and the pose must settle back."""
         from ghost_in_the_deck.animation.controller import AvatarAnimator

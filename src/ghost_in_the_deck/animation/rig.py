@@ -55,22 +55,7 @@ class AvatarRig:
     # Applied at runtime rather than baked into the asset, so the stance shares
     # one coordinate convention with the movement stacked on top of it and the
     # exported mesh and its bind weights stay untouched.
-    NEUTRAL_POSE = {
-        # Upper-arm pitch is what swings the arms down out of the A-pose; roll
-        # is mirrored so both elbows point back rather than out. Larger values
-        # reach the target skeleton angle but the linear-blend skin cannot take
-        # it - the shoulder splays into a wing - so these were chosen by
-        # rendering candidates rather than by the geometric solve alone.
-        "upperarm_l": (0.0, 30.0, 15.0),
-        "upperarm_r": (0.0, 30.0, -15.0),
-        "lowerarm_l": (0.0, -6.0, 0.0),
-        "lowerarm_r": (0.0, -6.0, 0.0),
-        "clavicle_l": (0.0, -3.0, 0.0),     # shoulders dropped, not braced
-        "clavicle_r": (0.0, -3.0, 0.0),
-        "spine_01": (0.0, 3.0, 0.0),        # a touch forward, as if over a deck
-        "calf_l": (0.0, 5.0, 0.0),          # knees unlocked rather than locked
-        "calf_r": (0.0, 5.0, 0.0),
-    }
+    NEUTRAL_POSE: dict[str, tuple[float, float, float]] = {}
 
     # Degrees a joint may move *from the neutral pose*, per axis. These are not
     # anatomy, they are a guard rail: they stop a bad coefficient upstream from

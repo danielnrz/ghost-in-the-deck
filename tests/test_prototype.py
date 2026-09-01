@@ -11,7 +11,6 @@ from ghost_in_the_deck.animation.cues import BeatTimeline
 from ghost_in_the_deck.sync import TimingRecorder
 
 import panda_env
-from ghost_in_the_deck.animation.rig import AvatarRig
 from synthetic import SampleState, groove_for, make_features, regular_beats
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets" / "avatar"
@@ -110,6 +109,7 @@ class TestVisibleMovement(unittest.TestCase):
             raise unittest.SkipTest("no display available for offscreen rendering")
 
         from ghost_in_the_deck.animation.controller import AvatarAnimator
+        from ghost_in_the_deck.animation.rig import AvatarRig
         from panda3d.core import AmbientLight, DirectionalLight, Vec4
 
         cls.base = panda_env.get_base()
@@ -158,24 +158,6 @@ class TestVisibleMovement(unittest.TestCase):
             moved = float((np.abs(frame - neutral).max(axis=2) > 12).mean())
             worst = max(worst, moved)
         self.assertLess(worst, 0.25, "pose drifted far from the neutral stance")
-
-    def test_neutral_stance_is_not_the_assets_a_pose(self):
-        """The avatar no longer stands with its arms out at 45 degrees."""
-        self.animator.reset()
-        stance = panda_env.render_screenshot().astype(np.int16)
-
-        # Undo the neutral correction to recover the asset's own rest pose.
-        for joint, (heading, pitch, roll) in AvatarRig.NEUTRAL_POSE.items():
-            rest_h, rest_p, rest_r = self.rig._rest[joint]
-            self.rig._joints[joint].setHpr(
-                rest_h - heading, rest_p - pitch, rest_r - roll
-            )
-        self.rig.force_update()
-        a_pose = panda_env.render_screenshot().astype(np.int16)
-
-        changed = float((np.abs(stance - a_pose).max(axis=2) > 12).mean())
-        self.assertGreater(changed, 0.02, f"stance barely differs from A-pose ({changed:.3%})")
-        self.animator.reset()
 
     def test_groove_moves_the_body_between_beats(self):
         """Movement continues where no beat accent is firing."""

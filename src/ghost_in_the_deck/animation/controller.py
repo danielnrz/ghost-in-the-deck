@@ -19,29 +19,37 @@ from .groove import GrooveEngine, GrooveState
 # ---------------------------------------------------------------------- gains
 # Peak degrees at full intensity. Kept together so the body can be retuned in
 # one place; every one of them is multiplied by the music's intensity.
-PELVIS_WEIGHT_ROLL = 2.4
-PELVIS_SWAY_HEADING = 1.6
-SPINE1_COUNTER_ROLL = 2.0          # keeps the torso over the feet
-SPINE2_SWAY_ROLL = 2.2
-SPINE2_SWAY_HEADING = 2.8
-SPINE3_SWAY_ROLL = 1.8
-SPINE3_BOUNCE_PITCH = 2.4
-NECK_BOUNCE_PITCH = 2.5
-NECK_PULSE_PITCH = 3.5
-HEAD_BOUNCE_PITCH = 3.5
-HEAD_PULSE_PITCH = 7.0
+#
+# Retuned in Phase 1A.1 after the skeleton was aligned with the mesh. Before
+# that every joint pivoted most of a metre from the body part it drove, so the
+# same angles threw the mesh around far more than they should have; with correct
+# pivots the upper body needed more travel and the legs much less. Leg gains are
+# deliberately small: the pelvis is the root, so bending a knee moves the foot
+# rather than lowering the body, and without IK anything larger reads as
+# sliding.
+PELVIS_WEIGHT_ROLL = 1.5
+PELVIS_SWAY_HEADING = 1.4
+SPINE1_COUNTER_ROLL = 3.0          # keeps the torso over the feet
+SPINE2_SWAY_ROLL = 3.4
+SPINE2_SWAY_HEADING = 3.6
+SPINE3_SWAY_ROLL = 2.4
+SPINE3_BOUNCE_PITCH = 3.2
+NECK_BOUNCE_PITCH = 3.2
+NECK_PULSE_PITCH = 4.5
+HEAD_BOUNCE_PITCH = 4.5
+HEAD_PULSE_PITCH = 8.0
 HEAD_BIAS_HEADING = 3.0
 HEAD_SWAY_HEADING = 2.0
 HEAD_SWAY_ROLL = 2.5
 HEAD_BREATH_PITCH = 1.2
-CLAVICLE_BOUNCE = 1.8
-CLAVICLE_PULSE = 4.0
-UPPERARM_BOUNCE_PITCH = 2.0
-UPPERARM_SWAY_ROLL = 2.0
-LOWERARM_BOUNCE_PITCH = 2.5
-THIGH_WEIGHT_ROLL = 1.6
-KNEE_BOUNCE_PITCH = 2.5
-KNEE_WEIGHT_PITCH = 2.0
+CLAVICLE_BOUNCE = 2.4
+CLAVICLE_PULSE = 5.0
+UPPERARM_BOUNCE_PITCH = 2.6
+UPPERARM_SWAY_ROLL = 2.4
+LOWERARM_BOUNCE_PITCH = 3.0
+THIGH_WEIGHT_ROLL = 0.8
+KNEE_BOUNCE_PITCH = 1.4
+KNEE_WEIGHT_PITCH = 1.2
 
 # How strongly the per-bar variation is allowed to unbalance the two sides.
 ASYMMETRY = 0.25
@@ -103,8 +111,10 @@ class AvatarAnimator:
             current[1] += pitch
             current[2] += roll
 
-        # Hips lead the weight shift; the lower spine leans back the other way so
-        # the body stays balanced over the feet instead of toppling sideways.
+        # Hips lead the weight shift, but only slightly: the pelvis is the root,
+        # so rolling it swings the legs and drags the feet across the floor. Most
+        # of the visible weight shift is carried by the spine above it, which
+        # costs the feet nothing.
         add("pelvis", heading=sway * PELVIS_SWAY_HEADING * scale,
             roll=weight * PELVIS_WEIGHT_ROLL * scale)
         add("spine_01", roll=-weight * SPINE1_COUNTER_ROLL * scale)
