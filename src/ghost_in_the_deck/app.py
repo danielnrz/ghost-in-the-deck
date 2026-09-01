@@ -5,7 +5,8 @@
     python -m ghost_in_the_deck.app --no-audio --seconds 20   # silent smoke run
 
 The chain is analysis -> MusicFeatures -> BeatTimeline + EnergyTrack ->
-GrooveEngine -> AvatarAnimator -> AvatarRig.
+GrooveEngine (how the body feels the music) and DJBehaviorEngine (what the DJ
+is occasionally doing on top) -> AvatarAnimator -> AvatarRig.
 This module only wires those together and owns the Panda3D scene.
 
 The playback clock is the authority for musical progress. Each frame asks the
@@ -25,13 +26,16 @@ from panda3d.core import loadPrcFileData
 
 from .animation.controller import AvatarAnimator
 from .animation.cues import BeatTimeline
+from .animation.dj_behavior import DJBehaviorEngine
 from .animation.groove import GrooveEngine
+from .animation.workstation import DEFAULT_TARGETS
 from .animation.rig import AvatarRig
 from .audio.analysis import analyse
 from .audio.decode import to_wav
 from .audio.features import SCHEMA_VERSION, MusicFeatures
 from .audio.library import DEFAULT_MUSIC_DIR, choose_track
 from .clock import PlaybackClock
+from .scene.workstation import build_workstation
 from .sync import TimingRecorder
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,10 +89,16 @@ class GhostApp:
 
         self._setup_scene()
         self.rig = AvatarRig(AVATAR, parent=self.base.render)
-        self._frame_avatar()
+        self.workstation = build_workstation(self.base.render)
+        self._frame_scene()
         self.timeline = BeatTimeline(self.features)
         self.groove = GrooveEngine(self.features, self.timeline)
-        self.animator = AvatarAnimator(self.rig, self.groove)
+        self.behavior = None if args.no_actions else DJBehaviorEngine(
+            self.features, self.timeline, energy=self.groove.energy
+        )
+        self.animator = AvatarAnimator(
+            self.rig, self.groove, self.behavior, DEFAULT_TARGETS
+        )
         self.recorder = TimingRecorder(
             beat_times=self.features.beats,
             response_window=self.animator.response_window,
@@ -101,6 +111,9 @@ class GhostApp:
 
         self._next_stall_at = args.stall_every if args.stall_every else None
         self._samples = 0
+        self._show_action = args.show_action
+        self._show_action_start = None
+        self._show_action_period = 3.0
         self.base.taskMgr.add(self._update, "ghost-update")
 
     # ------------------------------------------------------------------ scene
@@ -135,13 +148,22 @@ class GhostApp:
         floor.setP(-90)
         floor.setColor(0.14, 0.14, 0.18, 1)
 
-    def _frame_avatar(self) -> None:
-        """Place the camera from the avatar's real bounds rather than guesses."""
+    def _frame_scene(self) -> None:
+        """Frame the avatar and the workstation together, from a 3/4 angle.
+
+        A dead-on front view hides the workstation behind the avatar's own
+        body; a small side offset keeps both readable, which matters now that
+        there is something worth seeing on the table.
+        """
+        import math
+
         low, high = self.rig.actor.getTightBounds()
         height = high.z - low.z
         centre_z = low.z + height * 0.5
-        self.base.camera.setPos(0.0, -height * 2.4, centre_z)
-        self.base.camera.lookAt(0.0, 0.0, centre_z)
+        angle = math.radians(28.0)
+        distance = height * 2.3
+        self.base.camera.setPos(math.sin(angle) * distance, -math.cos(angle) * distance, centre_z * 0.95)
+        self.base.camera.lookAt(0.0, -0.25, centre_z * 0.85)
 
     # ------------------------------------------------------------------ frame
     def _update(self, task):
@@ -158,7 +180,17 @@ class GhostApp:
         # interval measurements line up. The simulated stall sits before both.
         wall_now = time.perf_counter()
 
-        state = self.animator.apply_at(now)
+        if self._show_action:
+            # Isolated review: loop one gesture's envelope on repeat, on top of
+            # the same groove, rather than waiting for the schedule to pick it.
+            if self._show_action_start is None:
+                self._show_action_start = now
+            phase = (now - self._show_action_start) % self._show_action_period
+            action = self._preview_action_at(phase)
+            state = self.groove.state_at(now)
+            self.animator._write_pose(state, action)
+        else:
+            state = self.animator.apply_at(now)
         update_seconds = time.perf_counter() - wall_now
 
         response = self.recorder.record_sample(
@@ -171,12 +203,20 @@ class GhostApp:
             print(response.format(), flush=True)
 
         if self.args.debug_motion and self._samples % self.args.debug_every == 0:
+            action = self.animator.action_at(now) if self.behavior else None
+            action_text = (
+                f"  action={action.action:<12} side={str(action.side):<4} "
+                f"progress={action.progress:.2f} weight={action.weight:.2f}"
+                if action is not None and action.is_active
+                else ""
+            )
             print(
                 f"t={state.time:7.2f}  beat={state.beat_index:<5d} "
                 f"phase={state.beat_phase:4.2f} bar={state.bar_phase:4.2f}  "
                 f"energy={state.energy:4.2f} intensity={state.intensity:4.2f}  "
                 f"pulse={state.pulse:4.2f} bounce={state.bounce:4.2f} "
-                f"sway={state.sway:+5.2f} weight={state.weight_shift:+5.2f}",
+                f"sway={state.sway:+5.2f} weight={state.weight_shift:+5.2f}"
+                f"{action_text}",
                 flush=True,
             )
         self._samples += 1
@@ -192,6 +232,32 @@ class GhostApp:
             print("playback stopped before the run finished", flush=True)
             return self._finish()
         return task.cont
+
+    def _preview_action_at(self, phase: float):
+        """One gesture, looped with a settled pause between repeats.
+
+        ``phase`` is time since this loop started, wrapped to
+        ``_show_action_period``. The gesture itself runs for its own duration
+        starting at 0; the remainder of the period is a pause at neutral so the
+        transition in and out is visible rather than a jump-cut.
+        """
+        from .animation.dj_behavior import DJActionState, _envelope_weight
+
+        duration = self._show_action_period * 0.55
+        if phase >= duration:
+            return DJActionState(
+                time=phase, action="none", progress=0.0, weight=0.0, side=None, strength=0.0
+            )
+        progress = phase / duration
+        weight = _envelope_weight(self._show_action, progress)
+        return DJActionState(
+            time=phase,
+            action=self._show_action,
+            progress=progress,
+            weight=weight,
+            side=self.args.show_side,
+            strength=0.85,
+        )
 
     def _finish(self):
         from direct.task import Task
@@ -219,6 +285,22 @@ def main() -> None:
     parser.add_argument("--no-audio", action="store_true", help="run without playback")
     parser.add_argument("--refresh", action="store_true", help="re-run analysis")
     parser.add_argument("--verbose", action="store_true", help="log every beat")
+    parser.add_argument(
+        "--no-actions",
+        action="store_true",
+        help="disable the DJ action layer; groove only, as in Phase 1A",
+    )
+    parser.add_argument(
+        "--show-action",
+        choices=("deck_glance", "lean_in", "hand_to_deck", "small_hype"),
+        help="loop one gesture on repeat instead of the scheduled behaviour, for review",
+    )
+    parser.add_argument(
+        "--show-side",
+        choices=("l", "r"),
+        default="l",
+        help="side for --show-action gestures that use one (default: l)",
+    )
     parser.add_argument(
         "--debug-motion",
         action="store_true",
