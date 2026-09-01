@@ -155,5 +155,10 @@ class SampleState:
     beat_age: float
 
     @property
-    def has_beat(self) -> bool:
+    def has_detected_beat(self) -> bool:
+        """This stand-in never carries virtual beats, so the sign is enough."""
         return self.beat_index >= 0
+
+    @property
+    def has_beat(self) -> bool:
+        return self.has_detected_beat

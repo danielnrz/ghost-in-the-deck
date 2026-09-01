@@ -82,7 +82,8 @@ class GrooveState:
     """Everything the animator needs, evaluated at one playback time."""
 
     time: float
-    beat_index: int
+    beat_index: int          # position on the beat grid; virtual outside the detected beats
+    has_detected_beat: bool  # True only when beat_index names an actually detected beat
     beat_age: float
     beat_phase: float       # 0..1 between the surrounding beats
     bar_phase: float        # 0..1 through a four-beat bar
@@ -97,7 +98,13 @@ class GrooveState:
 
     @property
     def has_beat(self) -> bool:
-        return self.beat_index >= 0
+        """Deprecated alias for ``has_detected_beat``.
+
+        Kept only because the sign of ``beat_index`` used to be the whole
+        answer, before virtual beats past the last detected one could also be
+        positive. New code should read ``has_detected_beat`` directly.
+        """
+        return self.has_detected_beat
 
 
 class GrooveEngine:
@@ -202,6 +209,7 @@ class GrooveEngine:
         return GrooveState(
             time=time,
             beat_index=beat.index,
+            has_detected_beat=beat.is_real,
             beat_age=beat_age,
             beat_phase=beat.phase,
             bar_phase=beat.bar_phase,

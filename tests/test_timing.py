@@ -181,7 +181,7 @@ class TestTimelineIsStateless(unittest.TestCase):
         self.assertIsNone(TIMELINE.cue_before(0.0))
         self.assertEqual(TIMELINE.index_before(0.0), -1)
         state = AvatarAnimator(RecordingRig(), GROOVE).state_at(0.1)
-        self.assertFalse(state.has_beat)
+        self.assertFalse(state.has_detected_beat)
         self.assertEqual(state.pulse, 0.0)
 
     def test_window_lookup_is_half_open(self):

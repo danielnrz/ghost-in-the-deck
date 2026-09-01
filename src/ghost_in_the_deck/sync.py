@@ -114,6 +114,13 @@ class TimingRecorder:
         wall-clock reading taken at the same moment as the playback time the
         pose was evaluated for.
 
+        ``state`` must distinguish a virtual beat (used only to keep the rhythm
+        continuous through an intro or outro) from a genuinely detected one via
+        ``has_detected_beat``. A virtual beat past the last detected one can
+        have a positive ``beat_index`` too, so the index alone cannot answer
+        that question - relying on its sign is what let a track's outro record
+        one beat response too many.
+
         Both intervals are derived here from the readings this method is given,
         so the playback and wall endpoints are matched by construction. Deriving
         them separately at the call site is what previously let an injected
@@ -142,7 +149,7 @@ class TimingRecorder:
         # response is still within the reporting window.
         response = None
         if (
-            state.has_beat
+            state.has_detected_beat
             and state.beat_index != self._last_beat_index
             and state.beat_index not in self._beats_seen
             and state.beat_age <= self.response_window
@@ -154,7 +161,7 @@ class TimingRecorder:
             )
             self.responses.append(response)
             self._beats_seen.add(state.beat_index)
-        if state.has_beat:
+        if state.has_detected_beat:
             self._last_beat_index = state.beat_index
         return response
 

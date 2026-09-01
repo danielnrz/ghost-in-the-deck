@@ -37,9 +37,17 @@ class BeatPhase:
 
     ``phase`` runs 0 at the previous beat to 1 at the next, which is what lets
     movement be continuous instead of a decaying twitch after each beat.
+
+    ``index`` numbers a position on the beat grid and keeps counting outside the
+    detected beats, so the rhythm stays continuous through an intro or outro.
+    That makes it unsafe to use on its own as "this is a real beat": a virtual
+    index can be positive too, immediately after the last detected beat, so a
+    check like ``index >= 0`` would call a virtual beat real. ``is_real`` is the
+    explicit answer - true only when ``index`` names an actually detected beat.
     """
 
-    index: int              # previous beat; -1 before the first
+    index: int              # position on the grid; virtual before/after the detected beats
+    is_real: bool           # True only when index names a detected beat, not a virtual one
     phase: float            # 0.0 .. 1.0 through the current beat
     interval: float         # seconds between the surrounding beats
     previous_time: float
@@ -137,9 +145,10 @@ class BeatTimeline:
         made bar phase jump every time the virtual beat rolled over, and the
         whole body twitched with it.
 
-        ``index`` is therefore only a beat number on the detected grid when it
-        falls in ``0 .. len(self) - 1``; outside that range it names a virtual
-        beat. Callers that care use ``has_beat`` or ``cue_before``.
+        ``index`` is therefore only a beat number on the detected grid when
+        ``is_real`` is true; outside that range it names a virtual beat used
+        purely to keep the rhythm going. Callers that need to know whether a
+        beat was actually detected read ``is_real``, not the sign of ``index``.
 
         Stateless like the rest of the timeline: the answer depends only on the
         time asked about.
@@ -153,6 +162,7 @@ class BeatTimeline:
             previous = index * nominal
             return BeatPhase(
                 index=index,
+                is_real=False,
                 phase=phase,
                 interval=nominal,
                 previous_time=previous,
@@ -170,6 +180,7 @@ class BeatTimeline:
             previous = first + step * nominal
             return BeatPhase(
                 index=step,
+                is_real=False,
                 phase=phase,
                 interval=nominal,
                 previous_time=previous,
@@ -197,6 +208,7 @@ class BeatTimeline:
 
         return BeatPhase(
             index=index,
+            is_real=0 <= index < len(self._times),
             phase=min(max(position, 0.0), 1.0),
             interval=interval,
             previous_time=previous,

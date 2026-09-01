@@ -4,14 +4,19 @@ This is the only module that manipulates bones. Everything above it works in
 terms of named joints and angles, so the rig can be swapped without touching the
 behaviour or animation logic.
 
-Two offsets stack on the asset's rest pose:
+The avatar's neutral standing pose lives in the asset itself: the Blender
+generation script (``scripts/blender/make_avatar.py``) aligns the skeleton with
+the mesh it deforms, poses it into a relaxed stance, and bakes that as the
+asset's own rest pose before export. Everything callers see through
+``set_offset`` is therefore already relative to a naturally standing body, and
+is the movement alone - not a stance correction stacked underneath it. Angles
+are relative rather than absolute because the MPFB skeleton still carries
+non-zero rest rotations of its own, which absolute values would ignore.
 
-    neutral   a fixed correction from the A-pose the MPFB asset is built in to a
-              natural standing position, applied on load
-    offset    the movement, measured from that neutral pose and clamped
-
-Callers only ever see the second one. Angles are relative because the MPFB
-skeleton has non-zero rest rotations, so absolute values would be meaningless.
+``NEUTRAL_POSE`` is kept as an empty extension point in case a future asset
+needs a runtime correction on top of its own rest pose; nothing populates it
+today, and if it ever does, that offset folds into the stored rest pose the same
+way the (now unused) A-pose correction used to.
 """
 
 from __future__ import annotations
@@ -47,14 +52,11 @@ class AvatarRig:
         "calf_r",
     )
 
-    # The A-pose correction, in degrees from the asset's rest pose. Solved offline
-    # against this skeleton by searching for upper-arm angles that put the arms
-    # 12 degrees off vertical, then choosing an elbow bend of about 20 degrees;
-    # the search is recorded in the Phase 1A notes rather than run at startup.
-    #
-    # Applied at runtime rather than baked into the asset, so the stance shares
-    # one coordinate convention with the movement stacked on top of it and the
-    # exported mesh and its bind weights stay untouched.
+    # A per-joint (heading, pitch, roll) correction applied on top of the
+    # asset's own rest pose, in degrees. Empty: the neutral standing pose is
+    # baked into the asset itself (see scripts/blender/make_avatar.py), so
+    # there is nothing left to correct here. This stays as the mechanism for
+    # doing so if a future asset ever needs one - see the module docstring.
     NEUTRAL_POSE: dict[str, tuple[float, float, float]] = {}
 
     # Degrees a joint may move *from the neutral pose*, per axis. These are not
@@ -93,8 +95,10 @@ class AvatarRig:
                 continue
             self._joints[name] = node
             hpr = node.getHpr()
-            # The neutral correction folds into the stored rest pose, so every
-            # angle above this line is measured from a naturally standing body.
+            # Any NEUTRAL_POSE correction folds into the stored rest pose, so
+            # every angle below this line is measured from a naturally standing
+            # body - the asset's own rest pose, currently, since the dict above
+            # is empty.
             base_h, base_p, base_r = self.NEUTRAL_POSE.get(name, (0.0, 0.0, 0.0))
             self._rest[name] = (hpr.x + base_h, hpr.y + base_p, hpr.z + base_r)
 

@@ -118,8 +118,8 @@ class TestVirtualBeatContinuity(unittest.TestCase):
         self.assertIsNone(timeline.cue_before(1.9))
         self.assertEqual(timeline.cue_before(2.1).index, 0)
         groove = groove_for([2.0 + i * 0.5 for i in range(12)], duration=12.0)
-        self.assertFalse(groove.state_at(1.5).has_beat)
-        self.assertTrue(groove.state_at(2.5).has_beat)
+        self.assertFalse(groove.state_at(1.5).has_detected_beat)
+        self.assertTrue(groove.state_at(2.5).has_detected_beat)
 
     def test_intro_phase_still_advances(self):
         timeline = self.timeline_from(2.0)
