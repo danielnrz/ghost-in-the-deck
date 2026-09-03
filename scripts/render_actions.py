@@ -3,9 +3,11 @@
     PYTHONPATH=src .venv/bin/python scripts/render_actions.py
 
 Writes front and three-quarter views of every gesture, held at peak weight, to
-out/action_review/. Also writes a neutral reference frame and a wide
-establishing shot showing the whole scene, since a gesture only means anything
-next to what it changed from.
+out/action_review/. Also writes a neutral reference frame, a wide establishing
+shot showing the whole scene, and - since hand_to_deck as of Phase 1B.2 is a
+staged path rather than a single pose - five trajectory frames per side
+(0%/25%/50%/75%/peak) so the approach over the tabletop can actually be judged,
+not just its endpoint.
 
 Joint numbers proved a poor guide to whether the neutral stance looked human in
 an earlier phase of this project; this exists for the same reason bone angles
@@ -24,17 +26,33 @@ OUT = ROOT / "out" / "action_review"
 
 # kind, side, output name. deck_glance and lean_in are unchanged from Phase
 # 1B and kept under their original names for direct regression comparison;
-# hand_to_deck (now real IK) and small_hype (now asymmetric) get new names so
-# the old and new renders are never confused for each other.
+# small_hype (asymmetric since Phase 1B.1) keeps its Phase 1B.1 name.
+# hand_to_deck is rendered separately below, as a trajectory, not a single pose.
 CASES = (
     ("deck_glance", None, "deck_glance"),
     ("lean_in", None, "lean_in"),
-    ("hand_to_deck", "l", "hand_to_deck_ik_l"),
-    ("hand_to_deck", "r", "hand_to_deck_ik_r"),
     ("small_hype", "l", "small_hype_new"),
     ("small_hype", "r", "small_hype_new_r"),
 )
 VIEWS = {"front": 12.0, "three_quarter": 42.0}
+
+# hand_to_deck trajectory frames: (label, progress fraction of the whole
+# event). 0/25/50/75% are fractions of the attack alone (0% = neutral, 100%
+# of the attack = the final target reached) - 50% lands exactly on the
+# clearance pose, the attack's own midpoint (see gesture_pose.py's
+# _reach_phase_weights), which is also roughly where the wrist crosses over
+# the tabletop's own near edge - matching "50% / over table / transition".
+# "peak" sits in the middle of the hold, at full weight.
+def _trajectory_stages():
+    from ghost_in_the_deck.animation.dj_behavior import ENVELOPE_SHAPE
+
+    attack, hold, _release = ENVELOPE_SHAPE["hand_to_deck"]
+    return (
+        ("25", 0.25 * attack),
+        ("50", 0.50 * attack),
+        ("75", 0.75 * attack),
+        ("peak", attack + hold / 2.0),
+    )
 
 
 def main() -> None:
@@ -78,7 +96,7 @@ def main() -> None:
     floor.setColor(0.16, 0.16, 0.20, 1)
 
     from ghost_in_the_deck.animation.controller import AvatarAnimator
-    from ghost_in_the_deck.animation.dj_behavior import DJActionState
+    from ghost_in_the_deck.animation.dj_behavior import DJActionState, _envelope_weight
     from ghost_in_the_deck.animation.groove import GrooveEngine
     from ghost_in_the_deck.animation.rig import AvatarRig
     from ghost_in_the_deck.animation.workstation import DEFAULT_TARGETS
@@ -144,6 +162,37 @@ def main() -> None:
             action = DJActionState(REFERENCE_TIME, kind, 0.5, 1.0, side, 0.9)
             set_pose(action)
             path = out_dir / f"{label}_{name}.png"
+            shoot(path)
+            written.append(path)
+
+        for side in ("l", "r"):
+            for stage_label, progress in _trajectory_stages():
+                weight = _envelope_weight("hand_to_deck", progress)
+                action = DJActionState(REFERENCE_TIME, "hand_to_deck", progress, weight, side, 0.9)
+                set_pose(action)
+                path = out_dir / f"reach_{side}_{stage_label}_{name}.png"
+                shoot(path)
+                written.append(path)
+
+    # A close, near-profile view specific to the reach trajectory: the
+    # over-the-table arc is mostly forward/up motion (Y/Z), which the front
+    # and three-quarter framings above mostly foreshorten away. Framed on the
+    # table/hand area rather than the whole body, and only for hand_to_deck.
+    profile_angle = math.radians(80.0)
+    profile_distance = height * 0.9
+    for side in ("l", "r"):
+        sign = 1.0 if side == "l" else -1.0
+        base.camera.setPos(
+            sign * math.sin(profile_angle) * profile_distance,
+            -math.cos(profile_angle) * profile_distance,
+            height * 0.62,
+        )
+        base.camera.lookAt(sign * 0.15, -0.34, height * 0.55)
+        for stage_label, progress in _trajectory_stages():
+            weight = _envelope_weight("hand_to_deck", progress)
+            action = DJActionState(REFERENCE_TIME, "hand_to_deck", progress, weight, side, 0.9)
+            set_pose(action)
+            path = out_dir / f"reach_{side}_{stage_label}_profile.png"
             shoot(path)
             written.append(path)
 
