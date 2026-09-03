@@ -251,7 +251,7 @@ zero - the loop misses samples, the music does not drift.
 The avatar now stands at a small procedural DJ workstation - a table, two deck
 platters and a mixer strip with a few knobs and faders - and occasionally does
 something a DJ does on top of the continuous groove: glances at the deck, leans
-in, reaches a hand toward a platter, or lifts into a small energetic accent.
+in, reaches a hand toward the controls, or lifts into a small energetic accent.
 
 **The workstation's layout lives in one place.** `animation/workstation.py`
 defines `DJWorkstationTargets` - plain `(x, y, z)` tuples, no Panda3D - and
@@ -289,7 +289,9 @@ PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.app --show-action hand_to_d
 ```
 
 loops one gesture on repeat, with the groove still running underneath it, in a
-real window. Or render still frames of all four:
+real window - and runs for 12 seconds by default rather than the whole track,
+since a few loops is plenty to judge a gesture by (`--seconds` still overrides
+this for a longer look). Or render still frames of every gesture:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/render_actions.py
@@ -297,6 +299,41 @@ PYTHONPATH=src .venv/bin/python scripts/render_actions.py
 
 writes a neutral reference, front and three-quarter views of every gesture, and
 one wide establishing shot, to `out/action_review/`.
+
+### Reaching for the controls (Phase 1B.1)
+
+`hand_to_deck` was originally a fixed set of joint rotations, the same shape as
+`lean_in` or `deck_glance`. Visually it did not read as reaching for anything -
+the hand moved vaguely toward the table without landing near it. Fixed
+rotations cannot land on a specific point; getting there needed real IK.
+
+`animation/arm_ik.py` is a small, dependency-free two-bone solver (shoulder ->
+elbow -> wrist, standard law-of-cosines geometry) that computes where the elbow
+should be for the wrist to reach a target - the general, testable part, and the
+part any future gesture could reuse. Turning that into this rig's joint
+rotations is not general, though: this skeleton's `controlJoint` transform is
+not a plain scene-graph-relative one, and calling Panda3D's own `lookAt()` on
+it aimed the arm at a direction with dot -0.78 against the intended target -
+nearly backwards. The only approach that actually worked was numerical: nudge a
+joint's rotation by a small amount, watch how the real, live rig's exposed
+child joint actually moved, and take repeated small damped steps toward the
+target. That solve is calibration, not runtime work - it ran once, offline, via
+`scripts/solve_arm_ik.py`, and its output is the fixed peak offsets
+`gesture_pose.py` blends in by the gesture's envelope weight, the same shape
+every other gesture already uses.
+
+One more deliberate choice: the workstation's own targets sit right at the edge
+of this arm's reach (confirmed by measurement - even the closest, the front
+control row, is about a centimetre beyond the arm's fully-stretched length), so
+aiming at the exact target locks the elbow almost straight. The gesture instead
+aims at 90% of that distance, which leaves the wrist about 5 cm short of the
+true target but gives a visibly bent elbow (about 45 degrees off straight)
+rather than a locked one - a real reach, not a stretch.
+
+`small_hype` changed too, for a different reason: two arms spreading outward in
+mirror image read as a T-pose, not a performance accent. It is now one arm,
+chosen deterministically per event the same way `hand_to_deck`'s side already
+was, while the other arm keeps grooving normally underneath it.
 
 ## Tests
 
@@ -322,6 +359,13 @@ gesture layer, and adds world-space checks - feet stay planted, a deck glance
 moves the head down, a hand-to-deck reach moves toward the table, a hype
 gesture moves away from it - because Phase 1A already showed that a correct
 joint angle can still move the mesh the wrong way if its pivot is wrong.
+`test_arm_ik.py` tests the IK geometry itself against independent facts (the
+solved elbow is exactly one bone-length from the shoulder and exactly the other
+from the target, for any reachable target; an unreachable one clamps instead of
+producing nonsense) rather than by re-deriving the same formula the code uses.
+`TestHandToDeckReach` in `test_dj_behavior.py` measures the actual reach on the
+real rig: wrist-to-target distance, wrist height against the tabletop, and
+elbow bend angle, for both arms.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
@@ -347,12 +391,18 @@ Two format notes, both learned the hard way:
 ## Known limitations
 
 - The gesture vocabulary is small and does not yet do anything to the audio
-  itself - no knob contact, no fader movement, no EQ, no crossfading. See the
-  recommendation at the end of the Phase 1B report for what that implies for
-  what comes next.
-- `hand_to_deck` does not use IK. It rotates the shoulder and elbow toward the
-  deck by a fixed amount; it does not solve for the hand actually landing on
-  the platter, and does not adapt to a different workstation layout.
+  itself - no knob contact, no fader movement, no EQ, no crossfading.
+- `hand_to_deck`'s IK targets a fixed point - the front control row - and its
+  peak offsets are calibrated once, offline, against the arm at rest. It does
+  not re-solve live against wherever the shoulder actually is once groove sway
+  has moved it, does not orient the wrist or fingers, and would need
+  recalibrating (`scripts/solve_arm_ik.py`) if the avatar or the workstation's
+  layout ever changed. In practice the wrist lands within about 5-8 cm of the
+  true target, which groove sway can add a little to or take a little from.
+- All of this avatar's workstation targets sit at or just beyond this arm's
+  natural reach - even the closest, the front control row, is about a
+  centimetre past it. Reaching for the platters themselves (10-27 cm further)
+  is not attempted; only the front row is used.
 - Gesture selection reasons about relative energy and a short trend, not real
   musical structure. It has no idea what a build-up, a drop or a breakdown is.
 - Bars are assumed to be four beats. A track in another metre still grooves,

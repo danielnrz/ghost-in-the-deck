@@ -24,6 +24,10 @@ from ghost_in_the_deck.animation.workstation import DEFAULT_TARGETS
 
 from synthetic import RecordingRig, behavior_for, groove_for, make_features, regular_beats
 
+# panda3d.core is importable without a display; only building a window needs
+# one, and the tests that do that already guard themselves with panda_env.
+from panda3d.core import Point3
+
 BPM = 124.0
 DURATION = 180.0
 BEAT_COUNT = int(DURATION / (60.0 / BPM))
@@ -443,7 +447,11 @@ class TestPhysicalPlausibility(unittest.TestCase):
         )
         cls.probes = {
             name: cls.rig.expose(name)
-            for name in ("head", "hand_l", "hand_r", "foot_l", "foot_r", "clavicle_l", "clavicle_r")
+            for name in (
+                "head", "hand_l", "hand_r", "foot_l", "foot_r",
+                "clavicle_l", "clavicle_r", "upperarm_l", "upperarm_r",
+                "lowerarm_l", "lowerarm_r",
+            )
         }
 
     def _positions(self):
@@ -503,18 +511,27 @@ class TestPhysicalPlausibility(unittest.TestCase):
         other = self._positions()["hand_r"]
         self.assertLess((other - rest).length(), 0.05)
 
-    def test_small_hype_moves_hands_away_and_up_not_toward_the_deck(self):
-        self._apply(None)
-        rest = self._positions()
-        self._apply(DJActionState(6.5, "small_hype", 0.5, 1.0, None, 0.9))
-        hyped = self._positions()
-
-        for hand in ("hand_l", "hand_r"):
+    def test_small_hype_moves_the_active_hand_away_and_up(self):
+        """small_hype is asymmetric - only the event's own side is raised."""
+        for side, hand in (("l", "hand_l"), ("r", "hand_r")):
+            self._apply(None)
+            rest = self._positions()
+            self._apply(DJActionState(6.5, "small_hype", 0.5, 1.0, side, 0.9))
+            hyped = self._positions()
             dz = hyped[hand].z - rest[hand].z
             dy = hyped[hand].y - rest[hand].y
-            with self.subTest(hand=hand):
+            with self.subTest(side=side):
                 self.assertGreater(dz, 0.0, f"{hand} did not rise during hype")
                 self.assertGreaterEqual(dy, -0.005, f"{hand} moved toward the deck during hype")
+
+    def test_small_hype_leaves_the_opposite_hand_close_to_groove_only(self):
+        """The un-raised arm should read as still grooving, not also hyping."""
+        self._apply(None)
+        groove_only = self._positions()["hand_r"]
+        self._apply(DJActionState(6.5, "small_hype", 0.5, 1.0, "l", 0.9))
+        during_hype = self._positions()["hand_r"]
+        travel = (during_hype - groove_only).length()
+        self.assertLess(travel, 0.03, f"opposite hand moved {travel*100:.1f} cm - hype leaked onto it")
 
     def test_gesture_pose_differs_measurably_from_groove_only(self):
         for kind in ACTIONS:
@@ -526,6 +543,174 @@ class TestPhysicalPlausibility(unittest.TestCase):
             worst = max((rest[k] - moved[k]).length() for k in rest)
             with self.subTest(kind=kind):
                 self.assertGreater(worst, 0.01, f"{kind} produced no visible movement")
+
+
+class TestHandToDeckReach(unittest.TestCase):
+    """The IK acceptance criteria in the review, measured against the real rig.
+
+    Thresholds are not guessed: WRIST_TOLERANCE and the tabletop height below
+    are read from the same measurement scripts/solve_arm_ik.py reports, not
+    invented separately here.
+    """
+
+    # scripts/solve_arm_ik.py measured 4.87 cm at full weight; this test's
+    # tolerance is deliberately a bit looser to absorb the small amount of
+    # shoulder movement groove sway contributes on top of the calibration's
+    # fixed baseline (the calibration solved with the arm alone, at rest).
+    WRIST_TOLERANCE = 0.08
+    TABLE_TOP = DEFAULT_TARGETS.surface_height   # 0.95 m; controls sit slightly above this
+
+    @classmethod
+    def setUpClass(cls):
+        import panda_env
+
+        if not panda_env.has_window():
+            raise unittest.SkipTest("no display available for offscreen rendering")
+
+        cls.base = panda_env.get_base()
+        cls.rig = AvatarRig(
+            __import__("pathlib").Path(__file__).resolve().parents[1]
+            / "assets" / "avatar" / "ghost_test.bam",
+            parent=cls.base.render,
+        )
+        cls.probes = {
+            name: cls.rig.expose(name)
+            for name in (
+                "hand_l", "hand_r", "upperarm_l", "upperarm_r",
+                "lowerarm_l", "lowerarm_r", "pelvis", "spine_02",
+            )
+        }
+
+    def setUp(self):
+        self.rig.reset()
+        self.groove = groove_for(BEATS, duration=DURATION, bpm=BPM, seed="reach")
+        self.animator = AvatarAnimator(self.rig, self.groove, targets=DEFAULT_TARGETS)
+
+    def _positions(self):
+        self.rig.force_update()
+        return {name: probe.getPos(self.base.render) for name, probe in self.probes.items()}
+
+    def _elbow_bend_degrees(self, side: str, positions) -> float:
+        """Interior angle at the elbow: 180 = dead straight, smaller = bent."""
+        shoulder = positions[f"upperarm_{side}"]
+        elbow = positions[f"lowerarm_{side}"]
+        wrist = positions[f"hand_{side}"]
+        upper = (elbow - shoulder); upper.normalize()
+        fore = (wrist - elbow); fore.normalize()
+        cos_angle = max(-1.0, min(1.0, upper.dot(fore)))
+        return 180.0 - math.degrees(math.acos(cos_angle))
+
+    def test_both_sides_move_the_wrist_close_to_their_control_target(self):
+        for side, target_attr in (("l", "left_controls"), ("r", "right_controls")):
+            self.rig.reset()
+            self.animator._write_pose(self.groove.state_at(6.5), None)
+            neutral = self._positions()[f"hand_{side}"]
+
+            self.animator._write_pose(
+                self.groove.state_at(6.5),
+                DJActionState(6.5, "hand_to_deck", 0.5, 1.0, side, 0.9),
+            )
+            reached = self._positions()[f"hand_{side}"]
+
+            target = Point3(*getattr(DEFAULT_TARGETS, target_attr))
+            neutral_dist = (target - neutral).length()
+            reached_dist = (target - reached).length()
+
+            with self.subTest(side=side):
+                self.assertGreater(
+                    neutral_dist, reached_dist * 2,
+                    f"neutral ({neutral_dist*100:.1f} cm) was not substantially "
+                    f"farther than reached ({reached_dist*100:.1f} cm)",
+                )
+                self.assertLess(
+                    reached_dist, self.WRIST_TOLERANCE,
+                    f"wrist landed {reached_dist*100:.1f} cm from {target_attr}, "
+                    f"wanted under {self.WRIST_TOLERANCE*100:.0f} cm",
+                )
+
+    def test_wrist_ends_at_or_above_tabletop_height(self):
+        for side in ("l", "r"):
+            self.rig.reset()
+            self.animator._write_pose(
+                self.groove.state_at(6.5),
+                DJActionState(6.5, "hand_to_deck", 0.5, 1.0, side, 0.9),
+            )
+            wrist = self._positions()[f"hand_{side}"]
+            with self.subTest(side=side):
+                self.assertGreaterEqual(
+                    wrist.z, self.TABLE_TOP,
+                    f"hand_{side} at Z={wrist.z:.3f} is below the tabletop ({self.TABLE_TOP})",
+                )
+
+    def test_elbow_is_bent_not_locked_straight(self):
+        for side in ("l", "r"):
+            self.rig.reset()
+            self.animator._write_pose(
+                self.groove.state_at(6.5),
+                DJActionState(6.5, "hand_to_deck", 0.5, 1.0, side, 0.9),
+            )
+            bend = self._elbow_bend_degrees(side, self._positions())
+            with self.subTest(side=side):
+                # 180 = dead straight. Comfortably under that, and nowhere
+                # near hyperextended (which would show as > 180, impossible
+                # here since acos is clamped to [0, 180]).
+                self.assertLess(bend, 165.0, f"elbow_{side} reads as locked straight ({bend:.1f} deg)")
+                self.assertGreater(bend, 60.0, f"elbow_{side} folded implausibly far ({bend:.1f} deg)")
+
+    def test_reaching_arm_does_not_cross_through_the_torso(self):
+        """The forearm/hand should stay on its own side of the body centreline."""
+        for side in ("l", "r"):
+            self.rig.reset()
+            self.animator._write_pose(
+                self.groove.state_at(6.5),
+                DJActionState(6.5, "hand_to_deck", 0.5, 1.0, side, 0.9),
+            )
+            positions = self._positions()
+            wrist_x = positions[f"hand_{side}"].x
+            elbow_x = positions[f"lowerarm_{side}"].x
+            with self.subTest(side=side):
+                if side == "l":
+                    self.assertGreater(wrist_x, -0.02, "left hand crossed to the right of centre")
+                    self.assertGreater(elbow_x, -0.02, "left elbow crossed to the right of centre")
+                else:
+                    self.assertLess(wrist_x, 0.02, "right hand crossed to the left of centre")
+                    self.assertLess(elbow_x, 0.02, "right elbow crossed to the left of centre")
+
+    def test_opposite_hand_stays_close_to_groove_only_during_a_reach(self):
+        for reaching_side, other in (("l", "hand_r"), ("r", "hand_l")):
+            self.rig.reset()
+            self.animator._write_pose(self.groove.state_at(6.5), None)
+            groove_only = self._positions()[other]
+
+            self.animator._write_pose(
+                self.groove.state_at(6.5),
+                DJActionState(6.5, "hand_to_deck", 0.5, 1.0, reaching_side, 0.9),
+            )
+            during_reach = self._positions()[other]
+            travel = (during_reach - groove_only).length()
+            with self.subTest(reaching_side=reaching_side):
+                self.assertLess(travel, 0.03, f"{other} moved {travel*100:.1f} cm during the reach")
+
+    def test_feet_stay_planted_during_a_reach(self):
+        import panda_env
+
+        probes = {n: self.rig.expose(n) for n in ("foot_l", "foot_r")}
+        self.rig.reset()
+        self.animator._write_pose(self.groove.state_at(6.5), None)
+        self.rig.force_update()
+        rest = {n: p.getPos(self.base.render) for n, p in probes.items()}
+
+        self.animator._write_pose(
+            self.groove.state_at(6.5),
+            DJActionState(6.5, "hand_to_deck", 0.5, 1.0, "l", 0.9),
+        )
+        self.rig.force_update()
+        reached = {n: p.getPos(self.base.render) for n, p in probes.items()}
+
+        for foot in ("foot_l", "foot_r"):
+            travel = (reached[foot] - rest[foot]).length()
+            with self.subTest(foot=foot):
+                self.assertLess(travel, 0.03, f"{foot} moved {travel*100:.1f} cm during the reach")
 
 
 if __name__ == "__main__":
