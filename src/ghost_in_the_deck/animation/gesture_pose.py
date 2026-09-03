@@ -37,10 +37,24 @@ across head/neck/spine-3 - the same distribution the groove's own beat-nod
 already uses - and lets the trig heading alone carry the "which way" part of
 looking toward the deck.
 
-Arm directions for lean_in / hand_to_deck / small_hype were established the
-same way: by rotating each joint on the built avatar and watching which way the
-hand or head actually moved, not by assuming a convention. See scripts in the
-project history; the directions are simply given as signed constants here.
+Arm directions for lean_in and small_hype were established the same way: by
+rotating each joint on the built avatar and watching which way the hand or
+head actually moved, not by assuming a convention.
+
+hand_to_deck is different: it is not a fixed pose, it is a real two-bone IK
+reach toward the workstation's control targets (see
+``animation.arm_ik.solve_elbow`` for the geometry and
+``scripts/solve_arm_ik.py`` for how the geometry was converted into this
+rig's joint offsets - a naive world-space aim does not work on this rig's
+skeleton, confirmed by testing). ``IK_REACH`` below is that solve's output:
+fixed peak offsets, blended in by the gesture's own envelope weight exactly
+like every other gesture's constants. The IK computation itself happens once,
+offline; nothing here re-solves it at runtime.
+
+small_hype is asymmetric - one arm, chosen by the scheduled event's own
+``side`` - rather than both arms mirrored. An earlier symmetric version read
+as a T-pose rather than a performance accent; one arm raised, with the other
+left to keep grooving normally, reads far more like an actual gesture.
 
 Nothing here imports Panda3D.
 """
@@ -85,18 +99,38 @@ LEAN_SPINE2_PITCH = 5.0
 LEAN_SPINE3_PITCH = 4.0
 LEAN_CLAVICLE_PITCH = -2.0    # a small forward droop of the shoulders
 
-REACH_UPPERARM_PITCH = 16.0   # positive = forward and slightly up
-REACH_UPPERARM_ROLL = 10.0    # sign flipped per side below; swings the hand
-                               # outward, toward that side's deck
-REACH_LOWERARM_PITCH = 10.0   # extends the elbow toward the target
+# Peak arm offsets from scripts/solve_arm_ik.py: a two-bone IK solve against
+# the real rig, aimed at 90% of the distance from the shoulder to
+# controls_for(side) (see that script's docstring for why not 100%). At full
+# weight this lands the wrist about 4.9 cm from the actual control target,
+# with a 135 degree elbow bend (about 45 degrees off dead straight) - a real
+# reach, not a locked-straight arm. Heading and roll mirror sign between
+# sides, matching every other gesture's convention; pitch does not.
 REACH_CLAVICLE_PITCH = -3.0
+IK_REACH = {
+    "l": {
+        "upperarm": (-18.563, 11.218, -14.108),
+        "lowerarm": (10.780, 28.217, 15.000),
+    },
+    "r": {
+        "upperarm": (18.563, 11.218, 14.108),
+        "lowerarm": (-10.780, 28.217, -15.000),
+    },
+}
 
-HYPE_UPPERARM_ROLL = 18.0     # sign flipped per side; raises the arm up and out
-HYPE_UPPERARM_PITCH = -8.0    # negative = up and back, away from the deck
-HYPE_CLAVICLE_PITCH = -3.0
-HYPE_SPINE3_PITCH = -2.5      # chest lifts - opposite sign from lean_in
-HYPE_NECK_PITCH = -2.0
-HYPE_HEAD_PITCH = -2.0
+# small_hype: one arm raised up and out, established by rendering candidates
+# and comparing hand height and hand-to-shoulder distance against neutral (a
+# pure pitch-dominant raise pointed the arm down-forward instead of up - roll
+# is what actually lifts it on this rig). The lowerarm's pitch limit (35
+# degrees) caps how much the elbow can fold; +28 is close to that cap and is
+# the most fold the rig allows without clamping away the rest of the raise.
+HYPE_UPPERARM_ROLL = 42.0     # sign flipped per side; raises the arm up and out
+HYPE_UPPERARM_PITCH = -18.0
+HYPE_LOWERARM_PITCH = 28.0
+HYPE_CLAVICLE_PITCH = -6.0
+HYPE_SPINE3_PITCH = -3.0      # chest lifts - opposite sign from lean_in
+HYPE_NECK_PITCH = -2.5
+HYPE_HEAD_PITCH = -2.5
 
 # Left-side rotation signs, probed directly on the rig; the right side mirrors
 # roll and heading (established convention throughout this project - the
@@ -138,25 +172,24 @@ def pose_offsets(state: DJActionState, targets: DJWorkstationTargets) -> Offsets
 
     elif state.action == "hand_to_deck":
         side = state.side or "l"
-        sign = _SIDE_SIGN[side]
-        upperarm = f"upperarm_{side}"
-        lowerarm = f"lowerarm_{side}"
         clavicle = f"clavicle_{side}"
-        _add(offsets, upperarm, pitch=REACH_UPPERARM_PITCH * scale, roll=-REACH_UPPERARM_ROLL * sign * scale)
-        _add(offsets, lowerarm, pitch=REACH_LOWERARM_PITCH * scale)
+        reach = IK_REACH[side]
+        uh, up, ur = reach["upperarm"]
+        lh, lp, lr = reach["lowerarm"]
+        _add(offsets, f"upperarm_{side}", heading=uh * scale, pitch=up * scale, roll=ur * scale)
+        _add(offsets, f"lowerarm_{side}", heading=lh * scale, pitch=lp * scale, roll=lr * scale)
         _add(offsets, clavicle, pitch=REACH_CLAVICLE_PITCH * scale)
 
     elif state.action == "small_hype":
-        # roll is negated per side: the probe that established these signs
-        # (module docstring) found NEGATIVE roll on upperarm_l is what raises
-        # the arm up and away from the body, not positive - the same sign a
-        # first pass at this got backwards, and the arm rolled in and down
-        # instead, which is what an earlier visual review caught.
-        for side in ("l", "r"):
-            sign = _SIDE_SIGN[side]
-            _add(offsets, f"upperarm_{side}", pitch=HYPE_UPPERARM_PITCH * scale,
-                 roll=-HYPE_UPPERARM_ROLL * sign * scale)
-            _add(offsets, f"clavicle_{side}", pitch=HYPE_CLAVICLE_PITCH * scale)
+        # One arm only - see the module docstring for why. roll is negated
+        # per side: probing found NEGATIVE roll on upperarm_l is what raises
+        # the arm up and away from the body, not positive.
+        side = state.side or "l"
+        sign = _SIDE_SIGN[side]
+        _add(offsets, f"upperarm_{side}", pitch=HYPE_UPPERARM_PITCH * scale,
+             roll=-HYPE_UPPERARM_ROLL * sign * scale)
+        _add(offsets, f"lowerarm_{side}", pitch=HYPE_LOWERARM_PITCH * scale)
+        _add(offsets, f"clavicle_{side}", pitch=HYPE_CLAVICLE_PITCH * scale)
         _add(offsets, "spine_03", pitch=HYPE_SPINE3_PITCH * scale)
         _add(offsets, "neck_01", pitch=HYPE_NECK_PITCH * scale)
         _add(offsets, "head", pitch=HYPE_HEAD_PITCH * scale)
@@ -171,15 +204,16 @@ _DAMPING = {
     "deck_glance": {"head": 0.35, "neck_01": 0.35, "spine_03": 0.55},
     "lean_in": {"spine_01": 0.55, "spine_02": 0.55, "spine_03": 0.55},
     "hand_to_deck": {"upperarm": 0.30, "lowerarm": 0.35, "clavicle": 0.45},
-    "small_hype": {"upperarm": 0.55, "clavicle": 0.65, "spine_03": 0.75, "neck_01": 0.75, "head": 0.8},
+    "small_hype": {"upperarm": 0.55, "lowerarm": 0.55, "clavicle": 0.65,
+                   "spine_03": 0.75, "neck_01": 0.75, "head": 0.8},
 }
 
 
-# Actions with no particular side (small_hype) damp both arms; a side-specific
-# action (hand_to_deck) damps only the arm it is actually reaching with. The
-# other arm keeps grooving at full strength either way - only the joints an
-# action actually means to control are ever damped.
-_BOTH_SIDED_ACTIONS = {"small_hype"}
+# Both hand_to_deck and small_hype are single-arm actions now, so both damp
+# only the joints on the event's own side. The other arm keeps grooving at
+# full strength - only the joints an action actually means to control are
+# ever damped.
+_BOTH_SIDED_ACTIONS: set[str] = set()
 
 
 def groove_damping(state: DJActionState) -> dict[str, float]:

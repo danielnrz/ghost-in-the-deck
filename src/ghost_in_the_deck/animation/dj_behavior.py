@@ -252,11 +252,12 @@ class DJBehaviorEngine:
 
                     side = None
                     if kind in ("hand_to_deck", "small_hype"):
+                        # Same channel for both: hand_to_deck reaches with this
+                        # arm, small_hype raises it. Each kind only ever reads
+                        # one of the two draws for a given bar, so this stays
+                        # independent of which kind actually got chosen.
                         side_roll = _unit(self.seed, bar, 3)
-                        if kind == "hand_to_deck":
-                            side = "l" if side_roll < 0.5 else "r"
-                        # small_hype occasionally leans on one side too, via
-                        # gesture_pose's own bias - it does not need a side here.
+                        side = "l" if side_roll < 0.5 else "r"
 
                     local_energy = self.energy.at(start)
                     strength = 0.6 + 0.4 * local_energy
