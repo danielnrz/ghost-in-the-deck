@@ -335,6 +335,37 @@ mirror image read as a T-pose, not a performance accent. It is now one arm,
 chosen deterministically per event the same way `hand_to_deck`'s side already
 was, while the other arm keeps grooving normally underneath it.
 
+### A reach path that goes around the table, not through it (Phase 1B.2)
+
+Phase 1B.1's calibrated endpoint was correct; the path to it was not. Blending
+neutral straight to the final reach in one sweep - the same shape every other
+gesture uses - happens to pass low and forward before it passes high, and the
+tabletop sits exactly in that path: measured, the wrist dipped into the
+tabletop solid partway through the attack and release.
+
+The fix is a staged path - neutral -> clearance -> target -> clearance ->
+neutral - through a second calibrated pose, `IK_CLEARANCE`. That pose is
+*not* aimed at an independent hover point the way the final reach is: a
+two-bone solve toward one does not converge on this rig (the forearm's local
+rotation range, shaped around the final reach's own nearly-straight
+direction, does not span the sharper bend a closer target needs - confirmed
+by opening the joint limits and iteration budget far past their real values
+and still landing 25 cm short). `IK_CLEARANCE` is instead the shoulder's own
+share of the final reach, reused verbatim, with the forearm left at rest and
+a small extra roll - tapering in and back out across the whole attack (and,
+mirrored, the whole release) - that lifts the path clear of the table where
+the unmodified version grazed it by a few millimetres. `scripts/solve_arm_ik.py`
+derives and searches for both; `gesture_pose.py`'s module docstring has the
+full account, and `tests/test_reach_trajectory.py` is what actually proves it
+safe - dense world-space sampling against the real, composed pose (groove
+included), not just the calibration in isolation.
+
+The workstation gained real geometry to match: `left_controls`/`right_controls`
+- what `hand_to_deck` was always reaching toward - previously had nothing
+visible at them. `scene/workstation.py` now builds a small control cluster
+(panel, knob, fader) directly from each of those two points, mirrored, so the
+hand visibly lands on something.
+
 ## Tests
 
 ```bash
@@ -365,7 +396,12 @@ from the target, for any reachable target; an unreachable one clamps instead of
 producing nonsense) rather than by re-deriving the same formula the code uses.
 `TestHandToDeckReach` in `test_dj_behavior.py` measures the actual reach on the
 real rig: wrist-to-target distance, wrist height against the tabletop, and
-elbow bend angle, for both arms.
+elbow bend angle, for both arms. `test_reach_trajectory.py` measures the whole
+staged path, not just its endpoint: 101-sample world-space collision checks
+against the real built tabletop and side-control geometry, for both arms and
+several groove states, plus continuity and schedule-independence checks and a
+subprocess check that `scripts/solve_arm_ik.py` still reproduces the committed
+constants.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
@@ -403,6 +439,11 @@ Two format notes, both learned the hard way:
   natural reach - even the closest, the front control row, is about a
   centimetre past it. Reaching for the platters themselves (10-27 cm further)
   is not attempted; only the front row is used.
+- `IK_CLEARANCE`'s extra lift (`CLEARANCE_LIFT_ROLL`) is a magnitude found by
+  dense sampling against this specific avatar and table, not a general
+  collision solver - if either geometry changes materially, re-run
+  `scripts/solve_arm_ik.py` and re-verify a real margin with
+  `test_reach_trajectory.py` rather than assuming the same value still clears.
 - Gesture selection reasons about relative energy and a short trend, not real
   musical structure. It has no idea what a build-up, a drop or a breakdown is.
 - Bars are assumed to be four beats. A track in another metre still grooves,
