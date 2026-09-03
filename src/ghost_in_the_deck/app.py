@@ -40,6 +40,12 @@ from .sync import TimingRecorder
 
 ROOT = Path(__file__).resolve().parents[2]
 AVATAR = ROOT / "assets" / "avatar" / "ghost_test.bam"
+
+# How long one --show-action loop runs before repeating, and (when --seconds
+# is not given explicitly) how long the whole review run lasts - a few loops
+# is plenty to judge a gesture by, and far short of waiting out a full track.
+SHOW_ACTION_LOOP_SECONDS = 3.0
+SHOW_ACTION_PREVIEW_SECONDS = 12.0
 ANALYSIS_DIR = ROOT / "out" / "analysis"
 REPORT_DIR = ROOT / "out"
 
@@ -113,7 +119,7 @@ class GhostApp:
         self._samples = 0
         self._show_action = args.show_action
         self._show_action_start = None
-        self._show_action_period = 3.0
+        self._show_action_period = SHOW_ACTION_LOOP_SECONDS
         self.base.taskMgr.add(self._update, "ghost-update")
 
     # ------------------------------------------------------------------ scene
@@ -293,7 +299,11 @@ def main() -> None:
     parser.add_argument(
         "--show-action",
         choices=("deck_glance", "lean_in", "hand_to_deck", "small_hype"),
-        help="loop one gesture on repeat instead of the scheduled behaviour, for review",
+        help=(
+            "loop one gesture on repeat instead of the scheduled behaviour, for "
+            f"review; runs {SHOW_ACTION_PREVIEW_SECONDS:.0f}s unless --seconds "
+            "says otherwise"
+        ),
     )
     parser.add_argument(
         "--show-side",
@@ -332,6 +342,14 @@ def main() -> None:
 
     if args.simulate_stall and not args.stall_every:
         parser.error("--simulate-stall needs --stall-every")
+
+    if args.show_action and args.seconds is None:
+        # Reviewing one gesture on repeat has no reason to wait out a whole
+        # track - a handful of loops of the 3 s preview period is plenty to
+        # judge it by. Normal playback is untouched: this only fires when
+        # --show-action is given and --seconds was not, so a real run always
+        # plays the full track exactly as before.
+        args.seconds = SHOW_ACTION_PREVIEW_SECONDS
 
     app = build_app(args)
     print(f"track : {app.track.name}")

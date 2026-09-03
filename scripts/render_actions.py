@@ -22,7 +22,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "action_review"
 
-GESTURES = ("deck_glance", "lean_in", "hand_to_deck", "small_hype")
+# kind, side, output name. deck_glance and lean_in are unchanged from Phase
+# 1B and kept under their original names for direct regression comparison;
+# hand_to_deck (now real IK) and small_hype (now asymmetric) get new names so
+# the old and new renders are never confused for each other.
+CASES = (
+    ("deck_glance", None, "deck_glance"),
+    ("lean_in", None, "lean_in"),
+    ("hand_to_deck", "l", "hand_to_deck_ik_l"),
+    ("hand_to_deck", "r", "hand_to_deck_ik_r"),
+    ("small_hype", "l", "small_hype_new"),
+    ("small_hype", "r", "small_hype_new_r"),
+)
 VIEWS = {"front": 12.0, "three_quarter": 42.0}
 
 
@@ -129,18 +140,10 @@ def main() -> None:
         shoot(path)
         written.append(path)
 
-        for kind in GESTURES:
-            side = "l" if kind == "hand_to_deck" else None
+        for kind, side, label in CASES:
             action = DJActionState(REFERENCE_TIME, kind, 0.5, 1.0, side, 0.9)
             set_pose(action)
-            path = out_dir / f"{kind}_{name}.png"
-            shoot(path)
-            written.append(path)
-
-        if "hand_to_deck" in GESTURES:
-            action = DJActionState(REFERENCE_TIME, "hand_to_deck", 0.5, 1.0, "r", 0.9)
-            set_pose(action)
-            path = out_dir / f"hand_to_deck_r_{name}.png"
+            path = out_dir / f"{label}_{name}.png"
             shoot(path)
             written.append(path)
 
