@@ -66,10 +66,37 @@ BASE_DURATION = {
 # Attack / hold / release fractions of an event's duration. They sum to 1.0.
 # A glance is quick down and lingers on the way back; a hype gesture is the
 # opposite - a punchy attack that settles slowly, the way a real accent decays.
+#
+# hand_to_deck's split was 0.35/0.30/0.35 through Phase 1B.2 round 2; R1 in
+# round 3 found both neutral<->clearance legs still snapped a real 60 FPS
+# frame even after gesture_pose's easing-curve and corner-width fixes
+# (``_flat_ease``, ``_SWING_RISE``/``_SWING_FALL``) - those alone brought both
+# legs to 5.1-5.3 m/s peak, still above the derived
+# REACH_LEG_PEAK_SPEED_MPS bound in test_reach_trajectory.py. Widening
+# attack/release at hold's expense closed most of the remaining gap: giving
+# each leg proportionally more of the event's fixed duration lowers peak
+# angular rate by that same proportion, uniformly across every term that
+# rides the leg, rather than reshaping any one of them further. This shifts
+# no event's start or end time - only how one fixed duration is split between
+# its own attack, hold and release. Widening ``gesture_pose._WAYPOINT_SNAP``
+# (see that constant's own comment) closed the rest.
+#
+# 0.45/0.10/0.45 - as far in this direction as the two legs needed - shrinks
+# the hold from 0.36 s to 0.12 s in absolute terms (BASE_DURATION 1.2 s before
+# jitter), comparable to small_hype's own ~0.1 s hold: still long enough to
+# read as the hand actually resting on the control. It also compresses
+# gesture_pose's mid-hold finger-lift excursion (``_HOLD_LIFT_*``, an
+# F1-derived, separately validated safety mechanism) into a much narrower
+# raw-progress window, which reopened test_trajectory_is_continuous's 3 cm
+# bound (~2.5 cm -> ~7 cm between adjacent 1/400 samples) until that
+# mechanism's own transition width was widened to compensate - see its
+# comment in gesture_pose.py for why that widening leaves the mechanism's
+# real-world timing essentially unchanged despite looking very different in
+# hold-relative terms.
 ENVELOPE_SHAPE = {
     "deck_glance": (0.30, 0.20, 0.50),
     "lean_in": (0.35, 0.30, 0.35),
-    "hand_to_deck": (0.35, 0.30, 0.35),
+    "hand_to_deck": (0.45, 0.10, 0.45),
     "small_hype": (0.25, 0.15, 0.60),
 }
 

@@ -412,42 +412,57 @@ class TestReachTrajectoryCollision(unittest.TestCase):
         self.assertAlmostEqual(reference.z, after_stall.z, places=9)
 
 
-# R1: a plausible peak hand speed for an emphatic DJ arm withdrawal - well
-# past a calm reach (~2 m/s) or a brisk one (~4-5 m/s), but nowhere near the
-# ~9.9-12.6 m/s the release leg swung at (see the "before" figures in the
-# Phase 1B.2 record) before gesture_pose._reach_phase_weights was reshaped to
-# spread that leg's transition across its full width instead of holding it
-# for _RELEASE_HOLD and cramming it into what remained. The reshaped leg's
-# measured worst case is still above a strict 2 cm-at-60-FPS bound (see the
-# class docstring below for the honest numbers), so this is the "derive a
-# bound from a plausible peak speed" fallback the task calls for, not 2 cm.
-RELEASE_LEG_PEAK_SPEED_MPS = 8.5
+# R1: a plausible peak hand speed for an emphatic-but-controlled DJ arm
+# withdrawal or approach, derived before this leg was ever swept at a real
+# frame rate, not fitted to what the sweep found:
+#
+#   * a calm, unhurried reach moves the hand at roughly 1-2 m/s;
+#   * a brisk, purposeful reach - the upper end of ordinary voluntary arm
+#     movement - runs 3-4 m/s;
+#   * a genuine strike (a thrown punch, a swat) is the next band up, 7-10 m/s.
+#
+# This gesture is neither: it is a hand leaving (or returning to) a control
+# with some emphasis, not a calm reach and nowhere near a strike. 4.0 m/s sits
+# at the top of the "brisk reach" band - as fast as a purposeful withdrawal
+# plausibly gets before it reads as a swipe rather than a hand leaving a
+# control. Both ``test_reach_leg_frame_step_at_*fps`` methods below assert
+# this same bound on both neutral<->clearance legs, fixed here before either
+# was measured against it.
+REACH_LEG_PEAK_SPEED_MPS = 4.0
 
 
 @unittest.skipUnless(ASSET.is_file(), "avatar asset not built")
-class TestReleaseLegFrameRate(unittest.TestCase):
-    """R1: the release (clearance->neutral) leg's wrist step at a *realistic*
-    playback frame rate, over the same real-scheduled-event population
+class TestReachLegFrameRate(unittest.TestCase):
+    """R1: both neutral<->clearance legs' wrist step at a *realistic* playback
+    frame rate, over the same real-scheduled-event population
     tests/reach_clearance.py sweeps - not the fine 1/400 progress sampling
     ``test_trajectory_is_continuous`` uses, which is ~5.5x finer than a 60 FPS
-    frame and missed this leg's one-frame snap entirely.
+    frame and missed both legs' one-frame snap entirely.
 
-    Before this fix, sampling that population at real frame steps found the
-    clearance->neutral leg alone covering up to 19.5/35.1/10.5 cm in a single
-    30/60/120 FPS frame (see the Phase 1B.2 record for the full before/after
-    table). ``_reach_phase_weights`` used to hold the clearance pose through
-    the first ``_RELEASE_HOLD`` (20%) of this leg and drop to neutral over
-    only what remained; it now spends the leg's whole width easing instead,
-    which measures 19.1/11.0/5.9 cm at the same three frame rates - roughly
-    the width ratio's worth of improvement (0.80 -> 1.0).
+    Both legs, not just the release: an earlier round only measured
+    clearance->neutral, on the reasoning that it alone had lost its
+    ``_RELEASE_HOLD`` protection against dragging the whole leg's travel into
+    a fraction of its width. But neutral->clearance was reshaped in the same
+    round (``_LIFT_RISE`` 0.22 -> 0.42) and nothing measured its own frame
+    step; measured here, it is in fact the *worse* of the two at every frame
+    rate below, not the better one - a plain per-1/400 continuity check
+    (~5.5x finer than a 60 FPS frame) cannot tell the difference, only a
+    real-frame-rate sweep like this one can.
 
-    That is still well past a strict 2 cm-at-60-FPS bound, and it cannot be
-    closed further without either widening ENVELOPE_SHAPE's release fraction
-    (a bigger, unrequested timing change) or shrinking the clearance pose's
-    own angular distance from neutral (which is tuned against the furniture
-    clearance sweep, not this test) - so the bound here is
-    ``RELEASE_LEG_PEAK_SPEED_MPS`` translated to a per-frame distance, not the
-    original 2 cm.
+    An ablation against this sweep (zeroing ``CLEARANCE_LIFT_ROLL`` or
+    ``REACH_SWING_OUT_ROLL``/``REACH_SWING_OUT_HEADING`` one at a time) found
+    neither the direct clearance-pose blend nor a peaked easing curve alone
+    was the dominant cause: ``swing`` and the lift roll, riding alongside that
+    blend as *separate* terms confined to a narrower sub-window of the leg
+    (``_plateau``'s own ``rise``/``fall`` corners), were. A single flattened
+    easing curve (``_flat_ease``, ``_REACH_EASE_RAMP``) on the main blend
+    only, without also widening those corners (``_SWING_RISE``/
+    ``_SWING_FALL``) and giving both legs more of the event's fixed duration
+    (``ENVELOPE_SHAPE["hand_to_deck"]``, 0.35/0.30/0.35 -> 0.45/0.10/0.45),
+    left both legs still above ``REACH_LEG_PEAK_SPEED_MPS`` - see the Phase
+    1B.2 record for the full progression. No event start or end time moved;
+    only how one fixed duration is split between attack, hold and release,
+    and how gradually each in-leg detour term engages.
     """
 
     @classmethod
@@ -461,13 +476,12 @@ class TestReleaseLegFrameRate(unittest.TestCase):
         cls.rig = AvatarRig(ASSET, parent=cls.base.render)
         cls.probes = {side: cls.rig.expose(f"hand_{side}") for side in ("l", "r")}
 
-    def _worst_release_leg_step(self, dt: float):
+    def _worst_leg_step(self, dt: float, lo: float, hi: float):
+        """Worst single-``dt``-step wrist travel over the real scheduled
+        population, restricted to progress in [``lo``, ``hi``]."""
         from reach_clearance import ENERGIES, SEEDS, TEMPOS, TRACK_SECONDS
 
         from synthetic import behavior_for
-
-        attack, hold, release = ENVELOPE_SHAPE["hand_to_deck"]
-        release_start = attack + hold + release / 2.0   # clearance -> neutral only
 
         worst = 0.0
         worst_info = None
@@ -493,7 +507,7 @@ class TestReleaseLegFrameRate(unittest.TestCase):
                             if (
                                 not action.is_active
                                 or action.action != "hand_to_deck"
-                                or action.progress < release_start
+                                or not (lo <= action.progress <= hi)
                             ):
                                 previous = None
                                 continue
@@ -509,13 +523,19 @@ class TestReleaseLegFrameRate(unittest.TestCase):
                             previous = pos
         return worst, worst_info
 
-    def _assert_bounded(self, fps: float):
+    def _assert_bounded(self, fps: float, leg: str):
+        attack, hold, release = ENVELOPE_SHAPE["hand_to_deck"]
+        if leg == "attack":
+            lo, hi = 0.0, attack / 2.0    # neutral -> clearance only
+        else:
+            lo, hi = attack + hold + release / 2.0, 1.0   # clearance -> neutral only
+
         dt = 1.0 / fps
-        worst, info = self._worst_release_leg_step(dt)
-        bound = RELEASE_LEG_PEAK_SPEED_MPS * dt
+        worst, info = self._worst_leg_step(dt, lo, hi)
+        bound = REACH_LEG_PEAK_SPEED_MPS * dt
         message = (
             f"wrist moved {worst*100:.1f} cm in one {fps:g} FPS frame on the "
-            f"release leg (bound {bound*100:.1f} cm)"
+            f"{leg} leg (bound {bound*100:.1f} cm)"
         )
         if info is not None:
             progress, event_start, bpm, energy, seed = info
@@ -525,16 +545,25 @@ class TestReleaseLegFrameRate(unittest.TestCase):
             )
         self.assertLess(worst, bound, message)
 
-    def test_release_leg_frame_step_at_60fps(self):
-        self._assert_bounded(60.0)
+    def test_reach_leg_frame_step_at_60fps_release(self):
+        self._assert_bounded(60.0, "release")
 
-    def test_release_leg_frame_step_at_30fps(self):
+    def test_reach_leg_frame_step_at_30fps_release(self):
         """30 FPS is the worse case: half the sample rate roughly doubles the
         per-frame distance for the same smooth motion."""
-        self._assert_bounded(30.0)
+        self._assert_bounded(30.0, "release")
 
-    def test_release_leg_frame_step_at_120fps(self):
-        self._assert_bounded(120.0)
+    def test_reach_leg_frame_step_at_120fps_release(self):
+        self._assert_bounded(120.0, "release")
+
+    def test_reach_leg_frame_step_at_60fps_attack(self):
+        self._assert_bounded(60.0, "attack")
+
+    def test_reach_leg_frame_step_at_30fps_attack(self):
+        self._assert_bounded(30.0, "attack")
+
+    def test_reach_leg_frame_step_at_120fps_attack(self):
+        self._assert_bounded(120.0, "attack")
 
 
 @unittest.skipUnless(ASSET.is_file(), "avatar asset not built")

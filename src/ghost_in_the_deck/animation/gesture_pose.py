@@ -212,9 +212,16 @@ IK_CLEARANCE = {
 #   CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL, and
 #   test_reach_trajectory.py asserts exactly that, so the number cannot drift
 #   and its provenance is one re-runnable script plus one named constant.
-LIFT_ROLL_KNEE = -35.0
+# R1 round 3: the knee search sweeps the composed pose across the whole
+# attack and release (scripts/solve_arm_ik.py's LIFT_SEARCH_SAMPLES), so it is
+# a function of the same timing constants R1 retuned - ENVELOPE_SHAPE,
+# _WAYPOINT_SNAP, _SWING_RISE/_FALL, _REACH_EASE_RAMP. Re-running the script
+# after those changes moved the knee from -35.0 to -36.0; this is that
+# search's real output, not a hand edit, and TestCalibrationReproducibility
+# enforces the two stay in sync.
+LIFT_ROLL_KNEE = -36.0
 COMPOSED_MARGIN_BUFFER_ROLL = -6.0
-CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -41.0
+CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -42.0
 
 # Phase 1B.2 finding F1: the wrist clears the workstation, but the fifteen
 # un-posed finger joints each hand carries (the furthest, ``middle_03``, ~160
@@ -335,6 +342,35 @@ def _smoothstep(x: float) -> float:
     return x * x * (3.0 - 2.0 * x)
 
 
+def _smoothstep_integral(x: float) -> float:
+    """Antiderivative of ``_smoothstep`` on [0, 1], for building ``_flat_ease``."""
+    return x * x * x - 0.5 * x * x * x * x
+
+
+# R1: a smoothed-trapezoid ease, 0 -> 1 over u in [0, 1], used in place of a
+# bare ``_smoothstep`` on the two neutral<->clearance legs' w_clear ramp.
+# A plain smoothstep's *velocity* (its derivative) is itself a hump peaking at
+# 1.5x its own mean - all of a leg's angular travel gets front- and back-loaded
+# around the midpoint, which is what made the release leg's one-frame wrist
+# step read as a snap rather than a withdrawal (Phase 1B.2 round 2 finding
+# R1). This shape instead eases in and out over ``_REACH_EASE_RAMP`` of the
+# ramp's own width on each end and holds a constant rate in between, so most
+# of the travel happens at one steady speed instead of at a single peak:
+# peak/mean velocity = 1 / (1 - _REACH_EASE_RAMP), a closed form, not a fitted
+# number. The two ramp corners are still smoothstep-shaped (so the curve
+# itself, and its velocity, stay continuous - no new keying discontinuity),
+# just confined to a smaller fraction of the leg.
+def _flat_ease(u: float, ramp: float) -> float:
+    u = min(max(u, 0.0), 1.0)
+    vmax = 1.0 / (1.0 - ramp)
+    if u < ramp:
+        return vmax * ramp * _smoothstep_integral(u / ramp)
+    if u <= 1.0 - ramp:
+        return vmax * ramp * 0.5 + vmax * (u - ramp)
+    q = u - (1.0 - ramp)
+    return (vmax * ramp * 0.5 + vmax * (1.0 - 2.0 * ramp)) + vmax * q - vmax * ramp * _smoothstep_integral(q / ramp)
+
+
 # The attack lift trapezoid: full by this fraction of the attack, easing back
 # to zero over the last (1 - _LIFT_FALL) of it. It leads the forward swing so
 # the arm is abducted and the forearm folded up before the hand travels out
@@ -363,14 +399,37 @@ _LIFT_FALL = 0.92
 # four fractions below are points along the hold (0 at its start, 1 at its end):
 # the lift eases out over [_HOLD_LIFT_DOWN0, _HOLD_LIFT_DOWN1], is zero across
 # the still middle, and eases back in over [_HOLD_LIFT_UP0, _HOLD_LIFT_UP1] so
-# the release crossing also starts at full lift. The descent is delayed to
-# _HOLD_LIFT_DOWN0 (~ progress 0.43, hand at x ~= 0.19) so it happens inboard of
-# the platter, not over it. HOLD mid sits in the still middle, so the settled
-# endpoint the calibration and the reach-distance test check is unchanged.
-_HOLD_LIFT_DOWN0 = 0.28
-_HOLD_LIFT_DOWN1 = 0.42
-_HOLD_LIFT_UP0 = 0.58
-_HOLD_LIFT_UP1 = 0.72
+# the release crossing also starts at full lift. The descent is delayed past
+# _HOLD_LIFT_DOWN0 so it happens inboard of the platter, not over it. HOLD mid
+# sits in the still middle, so the settled endpoint the calibration and the
+# reach-distance test check is unchanged.
+#
+# R1 round 3: the down/up transition width (_HOLD_LIFT_DOWN1 - _HOLD_LIFT_DOWN0,
+# mirrored for up) was 0.14 of the hold when the hold itself was 0.30 of the
+# whole event - an absolute width, in raw progress, of 0.14 * 0.30 = 0.042.
+# Shrinking ENVELOPE_SHAPE["hand_to_deck"]'s hold to 0.10 (see that constant's
+# own comment) to give the two neutral<->clearance legs the width R1 needed
+# leaves the *same* 0.14-of-hold transition covering a third of its former
+# raw-progress width, which is what test_trajectory_is_continuous samples at a
+# fixed resolution - it moved from ~2.5 cm to ~7 cm between adjacent 1/400
+# samples, far over the 3 cm bound. Widening the transition here to 0.40 of
+# the (now smaller) hold restores essentially the *same* 0.040 absolute
+# raw-progress width the original 0.14-of-0.30 gave, and with it the original
+# ~2.5-2.9 cm margin - despite reading as a much larger fraction of hold_u,
+# it happens at almost the same point along the whole event as before,
+# because attack grew at the same time hold shrank (see ENVELOPE_SHAPE's
+# comment): in absolute progress, _HOLD_LIFT_DOWN0 now fires at
+# attack + 0.07 * hold = 0.457, a shade later than the original
+# 0.35 + 0.28 * 0.30 = 0.434, not earlier. This does not touch what the
+# excursion does (full lift at both hold edges, relaxed only across the still
+# middle, now narrowed to 0.06 of hold to make room) or materially when it
+# happens - tests/reach_clearance.py's furniture-margin sweep, the actual
+# arbiter of whether that transition is safe, was re-run after this change
+# and still passes with an unchanged margin.
+_HOLD_LIFT_DOWN0 = 0.07
+_HOLD_LIFT_DOWN1 = 0.47
+_HOLD_LIFT_UP0 = 0.53
+_HOLD_LIFT_UP1 = 0.93
 
 
 def _hold_lift(hold_u: float) -> float:
@@ -385,32 +444,93 @@ def _hold_lift(hold_u: float) -> float:
 
 # How much of the neutral->clearance leg is spent moving (the rest sits parked
 # at the clearance pose): ease to the lifted pose over most of the leg, then
-# hold. On the way back, the clearance->neutral leg now spends its *whole*
-# width moving instead: an earlier version held the clearance pose through the
-# first ``_RELEASE_HOLD`` of that leg and dropped to neutral over only what
+# hold. On the way back, the clearance->neutral leg spends its *whole* width
+# moving instead: an earlier version held the clearance pose through the first
+# ``_RELEASE_HOLD`` of that leg and dropped to neutral over only what
 # remained, squeezing the whole angular travel back to neutral into 80% of an
-# already-short leg (~0.17 of the event, ~0.15-0.2 s) - at a real 60 FPS
-# playback step the wrist covered as much as ~20 cm in a single frame there, a
-# visible snap the old continuity test only missed because it sampled at
-# 1/400 of the event (~3 ms), far finer than any real frame. Spreading the same
-# travel across the leg's full width instead of 80% of it lowers peak wrist
-# speed on the release by that ratio - see tests/test_reach_trajectory.py's
-# frame-step test for the measured result. The fingers still clear the table
-# on the way out because the ``lift`` term (below) is a *separate* function of
-# ``w_clear`` that stays at its extreme for half of the leg regardless of how
-# ``w_clear`` itself is eased - see ``_LIFT_RELEASE_RAMP``.
-_WAYPOINT_SNAP = 0.85
+# already-short leg - at a real 60 FPS playback step the wrist covered as much
+# as ~20 cm in a single frame there, a visible snap the old continuity test
+# only missed because it sampled at 1/400 of the event (~3 ms), far finer than
+# any real frame. Spreading the same travel across the leg's full width
+# instead of 80% of it lowers peak wrist speed on the release by that ratio.
+#
+# R1 round 3: with the release leg already at full width, this fraction (still
+# 0.85, i.e. the *attack* leg's own ramp) was the one place left where the two
+# legs were not treated the same - reach the clearance posture by 85% of the
+# leg's width and sit at it for the rest, rather than spending the whole leg
+# on it the way release now does. That leftover 1/0.85 narrowing was enough on
+# its own to make the attack leg measurably the *worse* of the two in
+# ``TestReachLegFrameRate`` (see that test module's own comment) even after
+# every other lever had been pulled. Raising it to 0.97 - the same "sit before
+# the crossing" shape, just with almost none of the leg spent sitting - closed
+# most of the remaining gap at no cost to the crossing that follows: the
+# clearance pose is still reached (fractionally) before the crossing begins,
+# and tests/reach_clearance.py's furniture-margin sweep (which is what
+# actually validates "before the crossing begins" is early enough) was
+# re-run after this change and still passes with an unchanged margin.
+_WAYPOINT_SNAP = 0.97
+
+# R1: how much of each neutral<->clearance leg's own w_clear ramp (and, via
+# ``_plateau``, the lift and swing terms riding alongside it - see
+# ``_SWING_RISE``/``_SWING_FALL`` below) is spent easing in/out rather than
+# travelling at the ramp's own constant rate. Peak/mean velocity through the
+# ramp is 1/(1 - _REACH_EASE_RAMP): 1.064 at 0.06, close to a true constant-
+# rate sweep, still corner-smoothed enough not to read as mechanical. This
+# constant, ``_SWING_RISE``/``_SWING_FALL`` and
+# ``ENVELOPE_SHAPE["hand_to_deck"]``'s attack/release fractions were tuned
+# together against ``tests/test_reach_trajectory.py``'s ``TestReachLegFrameRate``
+# sweep - a bound derived independently, before any of these three were
+# touched (see that test module's own comment) - because no single one of
+# them closed the gap alone: flattening this curve alone left both legs'
+# peak barely changed (the dominant terms were ``lift`` and ``swing``, riding
+# through their *own*, narrower ``_plateau`` corners); widening those corners
+# closed most of the rest; the small remainder came from giving both legs
+# more of the event's fixed duration. None of the three moves any event's
+# start or end time, or IK_CLEARANCE's own angular distance from neutral.
+_REACH_EASE_RAMP = 0.06
+
+# R1: the width (as a fraction of ``swing``'s own 0..1..0 span) that the
+# REACH_SWING_OUT_* corner detour takes to engage and disengage. An ablation
+# against the frame-rate sweep (zeroing REACH_SWING_OUT_ROLL/HEADING one term
+# at a time) found ``swing`` was the single largest contributor to the
+# release-leg one-frame snap, bigger than the direct clearance-pose blend it
+# rides alongside, even after ``_flat_ease`` flattened its corner shape:
+# ``_plateau``'s corner is only ``rise`` (or ``1 - fall``) wide, so a fixed-
+# shape corner confined to a narrow sub-window of the leg necessarily moves
+# faster than the same shape spread across the leg's whole width, however
+# smooth the corner itself is. The old 0.22 / 0.80 split concentrated each
+# corner into on the order of a fifth of the swing's own span (a 1/0.22 ~= 4.5x
+# amplification over a corner spread across the whole span); 0.45 / 0.55 - as
+# wide as a corner can be while ``swing`` still has any flat "full" hold left
+# in the middle - cuts that to about 1/0.45 ~= 2.2x. Still not zero cost:
+# ``swing`` now spends more of the leg ramping and less time flat at its own
+# peak, so the corner detour itself is a little less sharply "arrived", but it
+# is still a 0..1..0 detour, still zero at the clearance pose and beyond.
+_SWING_RISE = 0.45
+_SWING_FALL = 0.55
 
 
 def _plateau(u: float, rise: float, fall: float) -> float:
-    """0..1..0 over ``u`` in [0, 1]: ramp up by ``rise``, hold, ramp down after ``fall``."""
+    """0..1..0 over ``u`` in [0, 1]: ramp up by ``rise``, hold, ramp down after ``fall``.
+
+    R1: every caller of this (``_trapezoid_lift``'s lift, and ``swing``) drives
+    a term that adds directly to the neutral<->clearance legs' upperarm roll
+    (``lift_roll``, ``swing_roll``) - a plain ``_smoothstep`` corner here was
+    the dominant contributor to the release-leg snap the frame-rate sweep
+    found, bigger than the main ``w_clear`` blend it rides alongside, because
+    its corner is confined to a narrower sub-window (``rise``/``1-fall``) than
+    ``w_clear``'s own ramp. Both corners use the same ``_flat_ease`` shape (and
+    the same ``_REACH_EASE_RAMP``) as that main blend for exactly that reason -
+    one flattened profile per leg, not one flattened term riding alongside a
+    peaked one.
+    """
     if u <= 0.0 or u >= 1.0:
         return 0.0
     if u < rise:
-        return _smoothstep(u / rise)
+        return _flat_ease(u / rise, _REACH_EASE_RAMP)
     if u <= fall:
         return 1.0
-    return 1.0 - _smoothstep((u - fall) / (1.0 - fall))
+    return 1.0 - _flat_ease((u - fall) / (1.0 - fall), _REACH_EASE_RAMP)
 
 
 def _trapezoid_lift(u: float) -> float:
@@ -472,8 +592,8 @@ def _reach_phase_weights(progress: float) -> tuple[float, float, float, float]:
             # begins. The slowest part of this swing is the hand passing the
             # table's near edge; getting to the lifted clearance pose sooner
             # keeps the trailing fingers from dragging through the slab.
-            w_clear = _smoothstep(progress / (half_attack * _WAYPOINT_SNAP))
-            return w_clear, 0.0, lift, _plateau((w_clear - 0.05) / 0.90, 0.22, 0.80)
+            w_clear = _flat_ease(progress / (half_attack * _WAYPOINT_SNAP), _REACH_EASE_RAMP)
+            return w_clear, 0.0, lift, _plateau((w_clear - 0.05) / 0.90, _SWING_RISE, _SWING_FALL)
         # clearance -> target: hold the lift full for the whole crossing (see
         # _HOLD_LIFT_RISE) - the trailing fingers are still over the platter here.
         t = _smoothstep((progress - half_attack) / half_attack)
@@ -495,10 +615,10 @@ def _reach_phase_weights(progress: float) -> tuple[float, float, float, float]:
     # rather than the clock, so it is still full while the hand is over the
     # table and only gone once it is back at the side.
     s = (release_progress - half_release) / half_release
-    w = _smoothstep(s)
+    w = _flat_ease(s, _REACH_EASE_RAMP)
     w_clear = 1.0 - w
-    lift = _smoothstep(min(1.0, w_clear / _LIFT_RELEASE_RAMP))
-    return w_clear, 0.0, lift, _plateau((w_clear - 0.05) / 0.90, 0.22, 0.80)
+    lift = _flat_ease(min(1.0, w_clear / _LIFT_RELEASE_RAMP), _REACH_EASE_RAMP)
+    return w_clear, 0.0, lift, _plateau((w_clear - 0.05) / 0.90, _SWING_RISE, _SWING_FALL)
 
 
 def pose_offsets(state: DJActionState, targets: DJWorkstationTargets) -> Offsets:
