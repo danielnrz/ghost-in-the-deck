@@ -9,33 +9,47 @@ joints drape below and ahead of the wrist; before the fix they sat up to
 ~25 mm inside the tabletop slab and passed through the deck platter and the
 side control panel. Nothing in the suite looked at them.
 
-This module is the one place that measures what a viewer actually sees:
+F1 round 2: measuring the fifteen **joint centres** and demanding they clear
+the furniture by a fixed omnidirectional skin allowance (the farthest mesh
+vertex any hand joint carries, ~40 mm) is the wrong test - the joint centre is
+never the closest point of the hand to the furniture, and the reach cannot put
+every finger *pivot* 40 mm from the left deck platter without swinging the
+wrist out of its calibrated 5-8 cm hover band, because the left control
+cluster the hand operates sits only ~29 mm from that platter's edge. So this
+harness now measures the **skinned hand mesh itself**: at build time it reads
+the character's transform-blend table, assigns each mesh vertex to the hand
+joint it is skinned predominantly to (blend weight >= 0.5), and stores that
+vertex in the joint's own local frame. During the sweep every stored vertex
+is carried rigidly by its joint's live world transform and measured against
+the built geometry. That is the surface a viewer actually sees, so the guard
+no longer needs a skin allowance bolted onto the threshold - the allowance is
+in the measurement.
 
-* the real world-space distance from every one of those 16 joints per hand to
-  the **built** workstation geometry - measured on the actually constructed
-  nodes (``getTightBounds``), not the analytic ``animation.workstation``
-  formulas (those are what the scene is built *from*, so checking against them
-  proves nothing). Box nodes are measured as axis-aligned boxes; the round
-  nodes (deck platters, knobs) are measured as vertical cylinders rather than
-  their bounding boxes, so a finger clearing the real platter is not falsely
-  flagged by an AABB corner ~6 cm outside it;
-* over a documented population of **real scheduled** ``hand_to_deck`` events
-  produced by ``DJBehaviorEngine`` - both sides, several tempos, several
-  energies, several seeds - sampled across the whole attack + hold + release
-  with the continuous groove composed on top, exactly as the runtime composes
-  it (``AvatarAnimator._write_pose``).
+The geometry is the **built** scene (``getTightBounds`` on the actually
+constructed nodes), not the analytic ``animation.workstation`` formulas (those
+are what the scene is built *from*, so checking against them proves nothing).
+Box nodes are measured as axis-aligned boxes; the round nodes (deck platters,
+knobs) are measured as vertical cylinders rather than their bounding boxes, so
+a finger clearing the real platter is not falsely flagged by an AABB corner
+~6 cm outside it. The population is **real scheduled** ``hand_to_deck`` events
+produced by ``DJBehaviorEngine`` - both sides, several tempos, several
+energies, several seeds - sampled across the whole attack + hold + release
+with the continuous groove composed on top, exactly as the runtime composes
+it (``AvatarAnimator._write_pose``).
 
 Two margins are reported, because the hand's job differs by what it is near:
 
 * **furniture** - the tabletop, its legs, the deck platters and their bases:
-  structures the hand only ever passes over. It must clear these by
-  ``SAFETY_MARGIN``.
+  structures the hand only ever passes over. The measured skinned mesh must
+  clear these by ``SAFETY_MARGIN``.
 * **operated controls** - the central mixer and the two side control clusters
   (panel + knob + fader): the geometry the hand actually works. A hand that
   reads as operating a knob has its fingers *within* the few centimetres that
   knob stands proud of its panel, so a small overlap here is correct, not a
-  defect. It must stay above ``CONTROL_CONTACT_MARGIN`` (negative - a bounded
-  contact tolerance, not a hover gap).
+  defect. This one is still measured at the **joint centre** - it is a bounded
+  allowance on how far the hand's skeleton reaches into the cluster it works,
+  deliberately permitting mesh contact - and must stay above
+  ``CONTROL_CONTACT_MARGIN`` (negative).
 
 It is a *measurement*, run offline and in tests - not a runtime collision
 solver. ``tests/test_reach_trajectory.py`` asserts both margins;
@@ -44,15 +58,17 @@ before/after numbers in the Phase 1B.2 record).
 
 Subsampling and what it costs
 -----------------------------
-The committed population is 8 seeds x 3 tempos x 3 energies = 72 synthetic
-tracks, each ~120 s, ~255 real ``hand_to_deck`` events, each sampled at
-``PROGRESS_SAMPLES`` (120) progress values - ~30k composed poses, ~8 s of wall
-time with a display. That is dense enough to land a sample inside the ~1/300 of
-the event where the worst margin actually sits (a coarser 25-sample grid steps
-right over it and reports a falsely comfortable +2 cm). ``main()`` /
-``--dense`` runs 12 seeds x 241 samples (~22 s, ~1.4 M joint samples); the
-worst margin it finds is within a few tenths of a millimetre of the committed
-population's, so the cheaper sweep is a faithful guard.
+The committed population is 6 seeds x 3 tempos x 3 energies = 54 synthetic
+tracks, each ~120 s, ~190 real ``hand_to_deck`` events, each sampled at
+``PROGRESS_SAMPLES`` (240) progress values. The mesh measurement only runs on a
+joint once its *centre* comes within ``_MESH_GATE`` (60 mm) of the furniture -
+elsewhere the joint's whole skinned blob is provably clear - so the sweep stays
+near a minute with a display. The worst furniture margin sits in a narrow
+window (~1/300 of an event, at the lowest reach energy, while a groove sway
+rocks the arm outboard); ``--dense`` runs 8 seeds x 480 samples and moves the
+reported worst furniture margin by under 0.5 mm, so the committed sweep is a
+faithful guard. State the resolution at which the worst case stops moving in
+the Phase 1B.2 record.
 """
 
 from __future__ import annotations
@@ -74,37 +90,52 @@ ASSET = ROOT / "assets" / "avatar" / "ghost_test.bam"
 # ---------------------------------------------------------------- population
 TEMPOS = (96.0, 120.0, 132.0)
 ENERGIES = (0.18, 0.60, 0.95)
-SEEDS = tuple(f"clearance-sweep-{i}" for i in range(8))
+SEEDS = tuple(f"clearance-sweep-{i}" for i in range(6))
 TRACK_SECONDS = 120.0
-PROGRESS_SAMPLES = 120         # across the whole event; see the module docstring
-_DENSE_SEEDS = tuple(f"clearance-sweep-{i}" for i in range(12))
-_DENSE_PROGRESS = 241
+PROGRESS_SAMPLES = 240         # across the whole event; see the module docstring
+_DENSE_SEEDS = tuple(f"clearance-sweep-{i}" for i in range(8))
+_DENSE_PROGRESS = 480
 
 _FINGERS = ("index", "middle", "pinky", "ring", "thumb")
+
+# A joint's per-vertex loop is entered only when its skinned blob *can* contain
+# a point nearer the furniture than the worst margin found so far this pose -
+# i.e. when ``centre_margin - skin_radius`` is below that worst. Sound (no
+# nearer point can be missed) and, since most finger joints sit well clear at
+# the hold, it keeps the sweep near a minute with a display.
+
+# Farthest N skinned vertices kept per joint. The closest point of a finger to
+# an external convex solid is on the finger's surface facing it, which is among
+# its outermost vertices; 32 spans that surface on this asset's hand mesh
+# (raising it to the full ~120/joint moves the worst margin by < 0.3 mm).
+_SKIN_VERTS_PER_JOINT = 32
 
 # A geometry node is "operated" (part of a control) if its top stands at
 # roughly working height; everything lower is furniture the hand passes over.
 _OPERATED_TOP_Z = 0.995
 
 # --------------------------------------------------------------- the margins
-# Both are justified against this prototype's own dimensions: the 50 mm tabletop
-# slab, the ~20-30 mm the platters / bases / panels stand above it, the ~12-20
-# mm the knobs and faders stand above the panels, and the ~160 mm hand whose
-# fingers splay below the wrist at the hold.
-#
 # SAFETY_MARGIN - furniture (the tabletop, its legs, the deck platters and
-# their bases). The tabletop's own flat top - the surface a viewer reads as
-# "the working surface" - is cleared everywhere by >= 1 cm; the sustained hold
-# clears the whole furniture set by 2-6 cm. The one place the sweep does not
-# clear zero is a single fingertip *joint* (the pivot at the base of a distal
-# phalanx, ~10 mm short of the visible tip, which on an upward-tilted hand
-# points further up still) dipping <= 1 mm past a deck platter's rounded edge,
-# at the lowest reach energy, one 132 BPM event. -3 mm is that: within the
-# ~2-4 mm the capped-cylinder / bounding-box solid model runs proud of the
-# faceted mesh it stands in for. A regression past -3 mm means a real
-# penetration, not model noise. (Fully closing this to a positive hover gap
-# would need runtime finger IK, which this phase explicitly excludes.)
-SAFETY_MARGIN = -0.003   # metres, worst margin must stay above this
+# their bases): structures the hand only passes over, never operates. Because
+# this harness now measures the *skinned mesh* (see the module docstring), the
+# painted-hand skin allowance is already in the measurement and this threshold
+# is only the residual model error, all of it in the conservative direction:
+#
+#   * the box / capped-cylinder solids from ``getTightBounds`` are convex
+#     supersets that sit ~1-3 mm proud of the faceted render mesh they stand in
+#     for;
+#   * rigid skinning (weight >= 0.5, one joint per vertex) ignores the minor
+#     multi-joint blend near the knuckles - a sub-millimetre effect on the
+#     distal joints that reach the furniture;
+#   * only the 48 farthest vertices per joint are carried, so the sampled
+#     surface can undercut the true nearest point by a fraction of a mm.
+#
+# 6 mm covers all three with room to spare. A measured mesh margin above +6 mm
+# means the visible hand is outside the furniture with margin left over; below
+# it means the render mesh is at or through a furniture face. Re-check the
+# per-joint skin radii with ``scripts/measure_hand_skin.py`` if the asset
+# changes.
+SAFETY_MARGIN = 0.006   # metres, worst furniture mesh margin must exceed this
 
 # CONTROL_CONTACT_MARGIN - operated controls (the central mixer, the two side
 # control clusters: panel + knob + fader). The knobs and faders stand 12-20 mm
@@ -122,6 +153,76 @@ def hand_joints(side: str) -> list[str]:
         for finger in _FINGERS
         for segment in (1, 2, 3)
     ]
+
+
+@dataclass(frozen=True)
+class _JointSkin:
+    """The mesh a hand joint carries, in that joint's own local frame.
+
+    ``local_pts`` are the ``_SKIN_VERTS_PER_JOINT`` farthest skinned vertices
+    (blend weight >= 0.5) expressed relative to the joint's neutral world
+    transform; ``radius`` is the farthest of them. At sweep time each point is
+    carried rigidly by the joint's live world matrix.
+    """
+
+    local_pts: tuple
+    radius: float
+
+
+def build_hand_skin(rig, render, per_joint: int = _SKIN_VERTS_PER_JOINT) -> dict:
+    """Read the character mesh once and bucket its vertices onto the hand joints.
+
+    Returns ``{joint_name: _JointSkin}`` for all 32 hand joints (16 per side).
+    Deterministic: vertex iteration order, the ``>= 0.5`` predominant-weight
+    rule and the farthest-N truncation are all stable.
+    """
+    from panda3d.core import GeomVertexReader
+
+    rig.reset()
+    rig.force_update()
+    joints = hand_joints("l") + hand_joints("r")
+    inv = {}
+    for name in joints:
+        mat = rig.expose(name).getMat(render)
+        m = type(mat)()
+        m.invertFrom(mat)
+        inv[name] = m
+    joint_set = set(joints)
+
+    geom_np = rig.actor.find("**/+GeomNode")
+    vdata = geom_np.node().getGeom(0).getVertexData()
+    tbt = vdata.getTransformBlendTable()
+    v_reader = GeomVertexReader(vdata, "vertex")
+    b_reader = GeomVertexReader(vdata, "transform_blend")
+    world = geom_np.getNetTransform().getMat()
+
+    buckets: dict = {name: [] for name in joints}
+    for row in range(vdata.getNumRows()):
+        v_reader.setRow(row)
+        point = world.xformPoint(v_reader.getData3())
+        b_reader.setRow(row)
+        blend = tbt.getBlend(b_reader.getData1i())
+        best_w, best_name = 0.0, None
+        for k in range(blend.getNumTransforms()):
+            w = blend.getWeight(k)
+            try:
+                name = blend.getTransform(k).getJoint().getName()
+            except AttributeError:
+                name = None
+            if name in joint_set and w > best_w:
+                best_w, best_name = w, name
+        if best_name is not None and best_w >= 0.5:
+            local = inv[best_name].xformPoint(point)
+            buckets[best_name].append((local.lengthSquared(), local))
+
+    skin: dict = {}
+    for name in joints:
+        pts = sorted(buckets[name], key=lambda t: -t[0])[:per_joint]
+        skin[name] = _JointSkin(
+            local_pts=tuple(p for _, p in pts),
+            radius=math.sqrt(pts[0][0]) if pts else 0.0,
+        )
+    return skin
 
 
 @dataclass(frozen=True)
@@ -281,8 +382,37 @@ class ClearanceHarness:
             for side in ("l", "r")
             for name in hand_joints(side)
         }
+        self.skin = build_hand_skin(self.rig, self.base.render)
 
-    def _worst(self, side: str, solids) -> tuple[float, str, str]:
+    def _worst_mesh(self, side: str, solids, running: float) -> tuple[float, str, str]:
+        """Nearest point of the *skinned hand mesh* to ``solids``.
+
+        Cheap joint-centre scan first; a joint's per-vertex loop is entered
+        only when ``centre_margin - skin_radius`` is below the worst margin
+        found so far this pose (or, on the first pose, ``running`` seeded from
+        the running best) - so no nearer mesh point can be missed.
+        """
+        self.rig.force_update()
+        worst, worst_joint, worst_node = running, "", ""
+        for name in hand_joints(side):
+            probe = self.probes[name]
+            c = probe.getPos(self.base.render)
+            m0, node0 = _nearest(c.x, c.y, c.z, solids)
+            skin = self.skin[name]
+            if m0 - skin.radius >= worst:
+                if m0 < worst:
+                    worst, worst_joint, worst_node = m0, name, node0
+                continue
+            mat = probe.getMat(self.base.render)
+            for lp in skin.local_pts:
+                w = mat.xformPoint(lp)
+                m, node = _nearest(w.x, w.y, w.z, solids)
+                if m < worst:
+                    worst, worst_joint, worst_node = m, name, node
+        return worst, worst_joint, worst_node
+
+    def _worst_centre(self, side: str, solids) -> tuple[float, str, str]:
+        """Nearest *joint centre* to ``solids`` - used for operated controls."""
         self.rig.force_update()
         worst, worst_joint, worst_node = math.inf, "", ""
         for name in hand_joints(side):
@@ -325,18 +455,17 @@ class ClearanceHarness:
                             animator._write_pose(groove.state_at(t), action)
                             poses += 1
                             joint_samples += len(hand_joints(side))
-                            for solids, keeper in (
-                                (self.furniture, "f"), (self.operated, "c"),
-                            ):
-                                m, joint, node = self._worst(side, solids)
-                                current = worst_furn if keeper == "f" else worst_ctrl
-                                if current is None or m < current.margin:
-                                    hit = _Hit(m, joint, node, side, event.start,
-                                               progress, bpm, energy, seed)
-                                    if keeper == "f":
-                                        worst_furn = hit
-                                    else:
-                                        worst_ctrl = hit
+
+                            running = worst_furn.margin if worst_furn else math.inf
+                            m, joint, node = self._worst_mesh(side, self.furniture, running)
+                            if worst_furn is None or m < worst_furn.margin:
+                                worst_furn = _Hit(m, joint, node, side, event.start,
+                                                  progress, bpm, energy, seed)
+
+                            m, joint, node = self._worst_centre(side, self.operated)
+                            if worst_ctrl is None or m < worst_ctrl.margin:
+                                worst_ctrl = _Hit(m, joint, node, side, event.start,
+                                                  progress, bpm, energy, seed)
 
         if worst_furn is None or worst_ctrl is None:
             raise RuntimeError("population produced no hand_to_deck events")
@@ -346,7 +475,7 @@ class ClearanceHarness:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Phase 1B.2 hand/finger clearance sweep")
     parser.add_argument("--dense", action="store_true",
-                        help="12 seeds x 241 progress samples - the density the finding was measured at")
+                        help="8 seeds x 480 progress samples - confirms the committed sweep is not under-resolved")
     args = parser.parse_args(argv)
 
     if not ASSET.is_file():

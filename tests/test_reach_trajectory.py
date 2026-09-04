@@ -408,11 +408,12 @@ class TestReachTrajectoryCollision(unittest.TestCase):
 
 @unittest.skipUnless(ASSET.is_file(), "avatar asset not built")
 class TestHandFingerClearancePopulation(unittest.TestCase):
-    """F1: the committed clearance guard - the whole hand (wrist + fifteen
-    finger joints) against the *built* workstation, swept over a documented
-    population of real scheduled hand_to_deck events with the groove composed
-    on top. See tests/reach_clearance.py for the population, the box/cylinder
-    solid model and the justification of both margins."""
+    """F1: the committed clearance guard - the *skinned hand mesh* (every vertex
+    the wrist and fifteen finger joints carry) against the *built* workstation,
+    swept over a documented population of real scheduled hand_to_deck events
+    with the groove composed on top. See tests/reach_clearance.py for the
+    population, the box/cylinder solid model, the mesh measurement and the
+    justification of both margins."""
 
     @classmethod
     def setUpClass(cls):
@@ -431,12 +432,12 @@ class TestHandFingerClearancePopulation(unittest.TestCase):
         result = ClearanceHarness().sweep()
         self.assertGreater(
             result.furniture.margin, SAFETY_MARGIN,
-            "hand/finger joint inside the furniture beyond the model tolerance:\n"
+            "skinned hand mesh inside the furniture beyond the model tolerance:\n"
             + result.describe(),
         )
         self.assertGreater(
             result.operated.margin, CONTROL_CONTACT_MARGIN,
-            "hand/finger joint too deep inside an operated control:\n"
+            "hand joint too deep inside an operated control:\n"
             + result.describe(),
         )
 

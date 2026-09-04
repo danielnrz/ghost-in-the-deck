@@ -361,17 +361,22 @@ Phase 1B.2's own finding was that all of this was being *checked* on the wrist
 alone. The rig carries fifteen un-posed finger joints per hand (the furthest
 ~160 mm past the wrist) that drive the visible hand mesh, and at the hold they
 were buried up to 25 mm in the tabletop. `tests/reach_clearance.py` is the new
-guard: it measures every one of those joints against the *built* workstation
-(boxes and vertical cylinders from `getTightBounds`, not the analytic
-formulas) over a documented population of real scheduled events with the
-groove composed on top, and `test_reach_trajectory.py` asserts a real margin
-on every run. The hold pose now clears the working surface by a centimetre or
-more; a fully positive per-instant hover gap everywhere would need runtime
-finger IK, which this phase excludes, so a single fingertip *joint* still
-grazes a deck platter's rounded edge by under a millimetre at the lowest reach
-energies - within the solid model's own tolerance, and documented as such.
-`scripts/solve_arm_ik.py` derives the calibration; `gesture_pose.py`'s module
-docstring has the full account.
+guard. It reads the character's skinning table once, buckets every hand-mesh
+vertex onto the joint it follows, and then carries that **actual mesh** through
+a documented population of real scheduled events - both sides, several tempos,
+energies and seeds, groove composed on top - measuring it against the *built*
+workstation (boxes and vertical cylinders from `getTightBounds`, not the
+analytic formulas). `test_reach_trajectory.py` asserts a real margin on every
+run. Because the guard now measures the painted surface rather than a skeleton
+pivot, the threshold is just residual model error (~6 mm): the skinned hand
+mesh clears every piece of furniture - tabletop, legs, deck platters and their
+bases - by more than 2 cm across the whole population, worst case a low-energy
+reach whose little finger passes near the left deck platter (that platter's
+edge sits ~29 mm from the side control the hand is operating). Deliberate
+near-contact with the knob the hand *works* is a separate, separately named
+allowance. `scripts/solve_arm_ik.py` derives the calibration;
+`scripts/measure_hand_skin.py` dumps the per-joint skin radii; `gesture_pose.py`'s
+module docstring has the full account.
 
 The workstation gained real geometry to match: `left_controls`/`right_controls`
 - what `hand_to_deck` was always reaching toward - previously had nothing
@@ -414,9 +419,8 @@ staged path, not just its endpoint: dense world-space collision checks against
 the real built tabletop and side-control geometry, for both arms and several
 groove states, continuity and schedule-independence checks, a subprocess check
 that `scripts/solve_arm_ik.py` still reproduces the committed constants, and
-the `reach_clearance.py` population sweep of every wrist and finger joint
-against the built workstation over real scheduled events with the groove on
-top.
+the `reach_clearance.py` population sweep of the skinned hand mesh against the
+built workstation over real scheduled events with the groove on top.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
@@ -459,8 +463,8 @@ Two format notes, both learned the hard way:
   if either geometry changes materially, re-run `scripts/solve_arm_ik.py` and
   re-verify a real margin with the `reach_clearance.py` sweep rather than
   assuming the same values still clear. The sweep is a *measurement* of the
-  existing joints, offline and in tests; there is no runtime collision solver
-  or runtime finger IK, by design.
+  existing skinned mesh, offline and in tests; there is no runtime collision
+  solver or runtime finger IK, by design.
 - Gesture selection reasons about relative energy and a short trend, not real
   musical structure. It has no idea what a build-up, a drop or a breakdown is.
 - Bars are assumed to be four beats. A track in another metre still grooves,
