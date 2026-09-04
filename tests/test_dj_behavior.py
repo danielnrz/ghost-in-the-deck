@@ -151,6 +151,26 @@ class TestScheduleIndependence(unittest.TestCase):
         self.assertEqual(direct.action, event.kind)
         self.assertAlmostEqual(direct.progress, 0.5, places=6)
 
+    def test_a_finished_gesture_leaves_no_stale_wrist_offset(self):
+        """hand_to_deck is the only gesture that drives a joint (the wrist) the
+        groove never writes. Applying a frame during the reach and then a frame
+        after it must leave the wrist exactly where a groove-only frame would -
+        no value carried over from the reach."""
+        rig = RecordingRig()
+        groove = groove_for(BEATS, duration=DURATION, bpm=BPM, seed="wrist-stale")
+        animator = AvatarAnimator(rig, groove, targets=DEFAULT_TARGETS)
+
+        groove_only = groove.state_at(9.0)
+        animator._write_pose(groove_only, None)
+        clean = rig.pose()
+
+        during = DJActionState(6.5, "hand_to_deck", 0.5, 1.0, "l", 0.9)
+        animator._write_pose(groove.state_at(6.5), during)
+        self.assertIn("hand_l", rig.pose(), "reach fixture never moved the wrist")
+
+        animator._write_pose(groove_only, None)
+        self.assertEqual(rig.pose(), clean)
+
     def test_composed_pose_is_schedule_independent(self):
         for probe in self.PROBES:
             reference_rig = RecordingRig()

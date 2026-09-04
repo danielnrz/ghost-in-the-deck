@@ -194,5 +194,12 @@ class AvatarAnimator:
         return composed
 
     def _write_pose(self, state: GrooveState, action: DJActionState | None = None) -> None:
+        # Reset first, so every controlled joint is defined purely by this
+        # moment's pose and never carries a value written for an earlier one.
+        # The groove writes every joint it drives on every frame, but a gesture
+        # touches joints the groove leaves alone - the wrists, for hand_to_deck
+        # - and without this reset those would keep a stale offset after the
+        # gesture ends, making the pose depend on which frames ran before it.
+        self.rig.reset()
         for name, (heading, pitch, roll) in self.pose_offsets(state, action).items():
             self.rig.set_offset(name, heading=heading, pitch=pitch, roll=roll)
