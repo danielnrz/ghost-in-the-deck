@@ -346,19 +346,32 @@ tabletop solid partway through the attack and release.
 The fix is a staged path - neutral -> clearance -> target -> clearance ->
 neutral - through a second calibrated pose, `IK_CLEARANCE`. That pose is
 *not* aimed at an independent hover point the way the final reach is: a
-two-bone solve toward one does not converge on this rig (the forearm's local
-rotation range, shaped around the final reach's own nearly-straight
-direction, does not span the sharper bend a closer target needs - confirmed
-by opening the joint limits and iteration budget far past their real values
-and still landing 25 cm short). `IK_CLEARANCE` is instead the shoulder's own
-share of the final reach, reused verbatim, with the forearm left at rest and
-a small extra roll - tapering in and back out across the whole attack (and,
-mirrored, the whole release) - that lifts the path clear of the table where
-the unmodified version grazed it by a few millimetres. `scripts/solve_arm_ik.py`
-derives and searches for both; `gesture_pose.py`'s module docstring has the
-full account, and `tests/test_reach_trajectory.py` is what actually proves it
-safe - dense world-space sampling against the real, composed pose (groove
-included), not just the calibration in isolation.
+two-bone solve toward one did not converge in a bounded, widened-limit search
+from one start (reproduced in `scripts/solve_arm_ik.py` - a limited negative
+result, not a proof that no rotation exists). `IK_CLEARANCE` instead reuses
+the final reach's shoulder rotation verbatim and folds the forearm up with a
+fixed elbow flexion, so the clearance-pose hand sits high and in front of the
+table rather than dangling at its edge. On top of that the reach adds a
+handful of small, separately named terms (extra abduction, wrist tilt-up, a
+corner detour, an inward hover at the hold); the ones that keep the hand off
+the table are deliberately not scaled by how hard the DJ reaches, since a
+timid low-energy reach has to clear the slab too.
+
+Phase 1B.2's own finding was that all of this was being *checked* on the wrist
+alone. The rig carries fifteen un-posed finger joints per hand (the furthest
+~160 mm past the wrist) that drive the visible hand mesh, and at the hold they
+were buried up to 25 mm in the tabletop. `tests/reach_clearance.py` is the new
+guard: it measures every one of those joints against the *built* workstation
+(boxes and vertical cylinders from `getTightBounds`, not the analytic
+formulas) over a documented population of real scheduled events with the
+groove composed on top, and `test_reach_trajectory.py` asserts a real margin
+on every run. The hold pose now clears the working surface by a centimetre or
+more; a fully positive per-instant hover gap everywhere would need runtime
+finger IK, which this phase excludes, so a single fingertip *joint* still
+grazes a deck platter's rounded edge by under a millimetre at the lowest reach
+energies - within the solid model's own tolerance, and documented as such.
+`scripts/solve_arm_ik.py` derives the calibration; `gesture_pose.py`'s module
+docstring has the full account.
 
 The workstation gained real geometry to match: `left_controls`/`right_controls`
 - what `hand_to_deck` was always reaching toward - previously had nothing
@@ -397,11 +410,13 @@ producing nonsense) rather than by re-deriving the same formula the code uses.
 `TestHandToDeckReach` in `test_dj_behavior.py` measures the actual reach on the
 real rig: wrist-to-target distance, wrist height against the tabletop, and
 elbow bend angle, for both arms. `test_reach_trajectory.py` measures the whole
-staged path, not just its endpoint: 101-sample world-space collision checks
-against the real built tabletop and side-control geometry, for both arms and
-several groove states, plus continuity and schedule-independence checks and a
-subprocess check that `scripts/solve_arm_ik.py` still reproduces the committed
-constants.
+staged path, not just its endpoint: dense world-space collision checks against
+the real built tabletop and side-control geometry, for both arms and several
+groove states, continuity and schedule-independence checks, a subprocess check
+that `scripts/solve_arm_ik.py` still reproduces the committed constants, and
+the `reach_clearance.py` population sweep of every wrist and finger joint
+against the built workstation over real scheduled events with the groove on
+top.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
@@ -439,11 +454,13 @@ Two format notes, both learned the hard way:
   natural reach - even the closest, the front control row, is about a
   centimetre past it. Reaching for the platters themselves (10-27 cm further)
   is not attempted; only the front row is used.
-- `IK_CLEARANCE`'s extra lift (`CLEARANCE_LIFT_ROLL`) is a magnitude found by
-  dense sampling against this specific avatar and table, not a general
-  collision solver - if either geometry changes materially, re-run
-  `scripts/solve_arm_ik.py` and re-verify a real margin with
-  `test_reach_trajectory.py` rather than assuming the same value still clears.
+- `CLEARANCE_LIFT_ROLL` and the other reach tuning terms are magnitudes found
+  by sweeping this specific avatar and table, not a general collision solver -
+  if either geometry changes materially, re-run `scripts/solve_arm_ik.py` and
+  re-verify a real margin with the `reach_clearance.py` sweep rather than
+  assuming the same values still clear. The sweep is a *measurement* of the
+  existing joints, offline and in tests; there is no runtime collision solver
+  or runtime finger IK, by design.
 - Gesture selection reasons about relative energy and a short trend, not real
   musical structure. It has no idea what a build-up, a drop or a breakdown is.
 - Bars are assumed to be four beats. A track in another metre still grooves,
