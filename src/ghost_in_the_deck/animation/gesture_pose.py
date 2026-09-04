@@ -302,7 +302,7 @@ REACH_UPPERARM_ROLL_CAP = 57.0
 # release it instead tracks ``w_clear`` down this ramp, so the abduction
 # relaxes only as the hand actually returns toward neutral and never drops the
 # arm while it is still swung out over the table.
-_LIFT_RELEASE_RAMP = 0.50
+_LIFT_RELEASE_RAMP = 0.90
 
 # small_hype: one arm raised up and out, established by rendering candidates
 # and comparing hand height and hand-to-shoulder distance against neutral (a
@@ -338,9 +338,16 @@ def _smoothstep(x: float) -> float:
 # The attack lift trapezoid: full by this fraction of the attack, easing back
 # to zero over the last (1 - _LIFT_FALL) of it. It leads the forward swing so
 # the arm is abducted and the forearm folded up before the hand travels out
-# over the table, but not so abruptly that the wrist teleports on the first
-# frame of the gesture (tests/test_reach_trajectory's continuity bound).
-_LIFT_RISE = 0.22
+# over the table. _LIFT_RISE used to be 0.22 (full lift by 7.7% of the whole
+# event - under half the width of the neutral->clearance leg it leads), which
+# put the same ~40 degree CLEARANCE_LIFT_ROLL swing that made the release leg
+# snap (see the constants near ``_WAYPOINT_SNAP``) on the *rise* leg too: a
+# real 60 FPS frame step there covered as much as ~17 cm. Spreading it to just
+# under the rise leg's own width keeps it leading the swing (it still finishes
+# a little before ``w_clear`` does - see ``_reach_phase_weights``) while
+# lowering peak wrist speed by close to the same ratio the release leg's fix
+# did.
+_LIFT_RISE = 0.42
 _LIFT_FALL = 0.92
 
 # Through the clearance<->target crossings the lift is held full, not run down
@@ -378,13 +385,21 @@ def _hold_lift(hold_u: float) -> float:
 
 # How much of the neutral->clearance leg is spent moving (the rest sits parked
 # at the clearance pose): ease to the lifted pose over most of the leg, then
-# hold. On the way back the clearance pose is instead held through the first
-# ``_RELEASE_HOLD`` of the clearance->neutral leg and dropped over what remains
-# - the fingers have to stay high until the hand is back past the table's near
-# edge, and a straight mirror of the attack would start dropping while still
-# over it.
+# hold. On the way back, the clearance->neutral leg now spends its *whole*
+# width moving instead: an earlier version held the clearance pose through the
+# first ``_RELEASE_HOLD`` of that leg and dropped to neutral over only what
+# remained, squeezing the whole angular travel back to neutral into 80% of an
+# already-short leg (~0.17 of the event, ~0.15-0.2 s) - at a real 60 FPS
+# playback step the wrist covered as much as ~20 cm in a single frame there, a
+# visible snap the old continuity test only missed because it sampled at
+# 1/400 of the event (~3 ms), far finer than any real frame. Spreading the same
+# travel across the leg's full width instead of 80% of it lowers peak wrist
+# speed on the release by that ratio - see tests/test_reach_trajectory.py's
+# frame-step test for the measured result. The fingers still clear the table
+# on the way out because the ``lift`` term (below) is a *separate* function of
+# ``w_clear`` that stays at its extreme for half of the leg regardless of how
+# ``w_clear`` itself is eased - see ``_LIFT_RELEASE_RAMP``.
 _WAYPOINT_SNAP = 0.85
-_RELEASE_HOLD = 0.20
 
 
 def _plateau(u: float, rise: float, fall: float) -> float:
@@ -475,12 +490,12 @@ def _reach_phase_weights(progress: float) -> tuple[float, float, float, float]:
         # Mirror of the attack crossing: lift stays full until the hand is back
         # at the clearance pose and clear of the platter.
         return t, 1.0 - t, 1.0, 0.0
-    # clearance -> neutral: hold the clearance pose through _RELEASE_HOLD of
-    # this leg, then drop to neutral over what remains. The lift roll follows
-    # w_clear down rather than the clock, so it is still full while the hand is
-    # over the table and only gone once it is back at the side.
+    # clearance -> neutral: ease from the clearance pose to neutral across the
+    # whole leg - see the constants above. The lift roll follows w_clear down
+    # rather than the clock, so it is still full while the hand is over the
+    # table and only gone once it is back at the side.
     s = (release_progress - half_release) / half_release
-    w = _smoothstep((s - _RELEASE_HOLD) / (1.0 - _RELEASE_HOLD))
+    w = _smoothstep(s)
     w_clear = 1.0 - w
     lift = _smoothstep(min(1.0, w_clear / _LIFT_RELEASE_RAMP))
     return w_clear, 0.0, lift, _plateau((w_clear - 0.05) / 0.90, 0.22, 0.80)

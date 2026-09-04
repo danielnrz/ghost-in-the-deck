@@ -303,11 +303,17 @@ class TestReachTrajectoryCollision(unittest.TestCase):
         """13. No discontinuity between adjacent samples - a real, smooth path.
 
         The bound is per 1/400 of the event (~3 ms of playback at these
-        tempos). The staged approach deliberately snaps to the lifted clearance
-        pose briskly - a real hand darting to the decks does move fast - so the
-        peak step is larger than a slow groove sway would give; what this guards
-        against is a *teleport* (a keying bug, a sign flip), not speed. 3.5 cm
-        in ~3 ms is fast but smooth; anything past that is a defect.
+        tempos) - fine enough to catch a *teleport* (a keying bug, a sign
+        flip), not to bound real playback speed (see
+        ``TestReleaseLegFrameRate`` below for that). It was 2 cm until Phase
+        1B.2 round 2 relaxed it to 5 cm to paper over a release-leg snap
+        instead of fixing it; that leg is now reshaped (see
+        ``gesture_pose._reach_phase_weights``) and this bound is back down
+        close to 2 cm, but not quite there - the worst case at this
+        resolution is now the mid-hold finger-lift excursion
+        (``_HOLD_LIFT_DOWN0``..``_HOLD_LIFT_UP1``), an F1-derived, separately
+        validated mechanism this fix does not touch, measured at ~2.5 cm here.
+        3 cm leaves it a small margin without reopening that 5 cm hole.
         """
         fine = [i / 400.0 for i in range(401)]
         for side in ("l", "r"):
@@ -317,7 +323,7 @@ class TestReachTrajectoryCollision(unittest.TestCase):
                 wrist = self._sample(groove, 6.5, side, progress)[f"hand_{side}"]
                 if previous is not None:
                     step = (wrist - previous).length()
-                    self.assertLess(step, 0.05, f"wrist jumped {step*100:.1f} cm between adjacent samples at progress={progress}")
+                    self.assertLess(step, 0.03, f"wrist jumped {step*100:.1f} cm between adjacent samples at progress={progress}")
                 previous = wrist
 
     def test_endpoint_reach_distance_is_acceptable(self):
@@ -404,6 +410,131 @@ class TestReachTrajectoryCollision(unittest.TestCase):
         self.assertAlmostEqual(reference.x, after_stall.x, places=9)
         self.assertAlmostEqual(reference.y, after_stall.y, places=9)
         self.assertAlmostEqual(reference.z, after_stall.z, places=9)
+
+
+# R1: a plausible peak hand speed for an emphatic DJ arm withdrawal - well
+# past a calm reach (~2 m/s) or a brisk one (~4-5 m/s), but nowhere near the
+# ~9.9-12.6 m/s the release leg swung at (see the "before" figures in the
+# Phase 1B.2 record) before gesture_pose._reach_phase_weights was reshaped to
+# spread that leg's transition across its full width instead of holding it
+# for _RELEASE_HOLD and cramming it into what remained. The reshaped leg's
+# measured worst case is still above a strict 2 cm-at-60-FPS bound (see the
+# class docstring below for the honest numbers), so this is the "derive a
+# bound from a plausible peak speed" fallback the task calls for, not 2 cm.
+RELEASE_LEG_PEAK_SPEED_MPS = 8.5
+
+
+@unittest.skipUnless(ASSET.is_file(), "avatar asset not built")
+class TestReleaseLegFrameRate(unittest.TestCase):
+    """R1: the release (clearance->neutral) leg's wrist step at a *realistic*
+    playback frame rate, over the same real-scheduled-event population
+    tests/reach_clearance.py sweeps - not the fine 1/400 progress sampling
+    ``test_trajectory_is_continuous`` uses, which is ~5.5x finer than a 60 FPS
+    frame and missed this leg's one-frame snap entirely.
+
+    Before this fix, sampling that population at real frame steps found the
+    clearance->neutral leg alone covering up to 19.5/35.1/10.5 cm in a single
+    30/60/120 FPS frame (see the Phase 1B.2 record for the full before/after
+    table). ``_reach_phase_weights`` used to hold the clearance pose through
+    the first ``_RELEASE_HOLD`` (20%) of this leg and drop to neutral over
+    only what remained; it now spends the leg's whole width easing instead,
+    which measures 19.1/11.0/5.9 cm at the same three frame rates - roughly
+    the width ratio's worth of improvement (0.80 -> 1.0).
+
+    That is still well past a strict 2 cm-at-60-FPS bound, and it cannot be
+    closed further without either widening ENVELOPE_SHAPE's release fraction
+    (a bigger, unrequested timing change) or shrinking the clearance pose's
+    own angular distance from neutral (which is tuned against the furniture
+    clearance sweep, not this test) - so the bound here is
+    ``RELEASE_LEG_PEAK_SPEED_MPS`` translated to a per-frame distance, not the
+    original 2 cm.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import panda_env
+
+        if not panda_env.has_window():
+            raise unittest.SkipTest("no display available for offscreen rendering")
+
+        cls.base = panda_env.get_base()
+        cls.rig = AvatarRig(ASSET, parent=cls.base.render)
+        cls.probes = {side: cls.rig.expose(f"hand_{side}") for side in ("l", "r")}
+
+    def _worst_release_leg_step(self, dt: float):
+        from reach_clearance import ENERGIES, SEEDS, TEMPOS, TRACK_SECONDS
+
+        from synthetic import behavior_for
+
+        attack, hold, release = ENVELOPE_SHAPE["hand_to_deck"]
+        release_start = attack + hold + release / 2.0   # clearance -> neutral only
+
+        worst = 0.0
+        worst_info = None
+        for seed in SEEDS:
+            for bpm in TEMPOS:
+                beats = regular_beats(bpm=bpm, count=int(TRACK_SECONDS / (60.0 / bpm)), offset=0.5)
+                for energy in ENERGIES:
+                    behavior = behavior_for(beats, duration=TRACK_SECONDS, bpm=bpm, seed=seed, energy=energy)
+                    groove = groove_for(beats, duration=TRACK_SECONDS, bpm=bpm, seed=seed, energy=energy)
+                    animator = AvatarAnimator(self.rig, groove, targets=DEFAULT_TARGETS)
+                    for event in behavior.events:
+                        if event.kind != "hand_to_deck":
+                            continue
+                        probe = self.probes[event.side or "l"]
+                        previous = None
+                        i = 0
+                        while True:
+                            t = event.start + i * dt
+                            if t > event.end:
+                                break
+                            i += 1
+                            action = behavior.state_at(t)
+                            if (
+                                not action.is_active
+                                or action.action != "hand_to_deck"
+                                or action.progress < release_start
+                            ):
+                                previous = None
+                                continue
+                            self.rig.reset()
+                            animator._write_pose(groove.state_at(t), action)
+                            self.rig.force_update()
+                            pos = probe.getPos(self.base.render)
+                            if previous is not None:
+                                step = (pos - previous).length()
+                                if step > worst:
+                                    worst = step
+                                    worst_info = (action.progress, event.start, bpm, energy, seed)
+                            previous = pos
+        return worst, worst_info
+
+    def _assert_bounded(self, fps: float):
+        dt = 1.0 / fps
+        worst, info = self._worst_release_leg_step(dt)
+        bound = RELEASE_LEG_PEAK_SPEED_MPS * dt
+        message = (
+            f"wrist moved {worst*100:.1f} cm in one {fps:g} FPS frame on the "
+            f"release leg (bound {bound*100:.1f} cm)"
+        )
+        if info is not None:
+            progress, event_start, bpm, energy, seed = info
+            message += (
+                f" at progress={progress:.4f} event_start={event_start:.2f} "
+                f"bpm={bpm} energy={energy} seed={seed}"
+            )
+        self.assertLess(worst, bound, message)
+
+    def test_release_leg_frame_step_at_60fps(self):
+        self._assert_bounded(60.0)
+
+    def test_release_leg_frame_step_at_30fps(self):
+        """30 FPS is the worse case: half the sample rate roughly doubles the
+        per-frame distance for the same smooth motion."""
+        self._assert_bounded(30.0)
+
+    def test_release_leg_frame_step_at_120fps(self):
+        self._assert_bounded(120.0)
 
 
 @unittest.skipUnless(ASSET.is_file(), "avatar asset not built")
