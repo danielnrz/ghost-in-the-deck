@@ -88,15 +88,19 @@ the attack and, tracking the hand back down, over the release),
 up across the controls), ``REACH_SWING_OUT_ROLL`` / ``REACH_SWING_OUT_HEADING``
 (a transient corner detour on the neutral<->clearance legs), and
 ``REACH_HOVER_HEADING`` (a few degrees inward at the hold, off the platter on
-the hand's own side). The safety terms - the clearance elbow fold, the lift
-roll and the wrist pitch - are deliberately NOT strength-scaled: a timid
-low-energy reach has to clear the slab just as well as an emphatic one, and
-the low-strength cases are exactly where the fingertip joints were measured
-grazing it. ``CLEARANCE_LIFT_ROLL``'s magnitude is derived end to end by
+the hand's own side) and ``REACH_HOLD_HAND_ROLL`` (a wrist-only roll at the
+hold that tips the pinky edge of the hand up off the platter top, which sits
+below and behind the control surface). The safety terms - the clearance elbow
+fold, the lift roll, the wrist pitch and the hold-time wrist roll - are
+deliberately NOT strength-scaled: a timid low-energy reach has to clear the
+furniture just as well as an emphatic one, and the low-strength cases are
+exactly where the fingertip joints were measured grazing it.
+``CLEARANCE_LIFT_ROLL``'s magnitude is derived end to end by
 ``scripts/solve_arm_ik.py`` (see its comment); every term is re-checked
 against the real composed pose - groove included, the full scheduled event
-population - by ``tests/reach_clearance.py``, which asserts a real margin on
-every test run.
+population - by ``tests/reach_clearance.py``, which carries the actual skinned
+hand mesh through each pose and asserts a real margin against the built
+workstation on every test run.
 
 small_hype is asymmetric - one arm, chosen by the scheduled event's own
 ``side`` - rather than both arms mirrored. An earlier symmetric version read
@@ -208,9 +212,9 @@ IK_CLEARANCE = {
 #   CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL, and
 #   test_reach_trajectory.py asserts exactly that, so the number cannot drift
 #   and its provenance is one re-runnable script plus one named constant.
-LIFT_ROLL_KNEE = -34.0
+LIFT_ROLL_KNEE = -35.0
 COMPOSED_MARGIN_BUFFER_ROLL = -6.0
-CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -40.0
+CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -41.0
 
 # Phase 1B.2 finding F1: the wrist clears the workstation, but the fifteen
 # un-posed finger joints each hand carries (the furthest, ``middle_03``, ~160
@@ -237,6 +241,26 @@ CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -40.0
 #                        the centre line during the hold, lifting the fingers
 #                        off the deck platter / deck base on the hand's own
 #                        side. Mirrors sign like IK_REACH's heading.
+#   REACH_HOLD_HAND_ROLL- rolls the wrist so the trailing (little-finger) edge
+#                        of the hand tips up during the hold and the two
+#                        clearance<->target crossings. F1 round 2: the deck
+#                        platter's top sits ~20 mm *below* the control surface
+#                        the hand hovers at and just behind it, and the left
+#                        control cluster the hand operates sits only ~29 mm
+#                        from that platter's edge, so the pinky - the hand's
+#                        lowest, most trailing point at the hold - draped close
+#                        to the platter's rounded top at the lowest reach
+#                        energy while a groove sway rocked the arm outboard.
+#                        This term rotates about the wrist joint only, so it
+#                        tips the pinky edge up off the platter without moving
+#                        the wrist itself - the settled endpoint the
+#                        calibration and the reach-distance test check is
+#                        byte-for-byte unchanged. With it the skinned pinky
+#                        mesh clears the platter by >2 cm across the whole
+#                        population (tests/reach_clearance.py).
+#                        Scaled by ``w_target`` (0 at neutral and at the
+#                        clearance pose, 1 at the hold), mirrored in sign per
+#                        side like the other roll terms.
 #   REACH_SWING_OUT_HEADING / REACH_SWING_OUT_ROLL - a transient detour on the
 #                        neutral<->clearance legs only (see
 #                        ``_reach_phase_weights``'s ``swing``). The roll term
@@ -251,13 +275,23 @@ CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -40.0
 # by sweeping them against the built-geometry population harness in
 # tests/reach_clearance.py, whose worst-margin report is deterministic and
 # which every test run re-asserts. Wrist pitch (peak ~54 deg with the transit
-# term) stays inside its 60 deg guard rail; the reach's total upper-arm
-# abduction is capped at REACH_UPPERARM_ROLL_CAP, below its 60 deg rail, and
-# the headings stay well inside their 25 deg one.
+# term) stays inside its 60 deg guard rail and the hold-time wrist roll (12 deg)
+# inside its 20 deg one; the reach's total upper-arm abduction is capped at
+# REACH_UPPERARM_ROLL_CAP, below its 60 deg rail, and the headings stay well
+# inside their 25 deg one.
 REACH_HAND_PITCH = 48.0
 REACH_HAND_PITCH_RAMP = 0.40   # full base wrist pitch by 40% of the way in
 REACH_TRANSIT_HAND_PITCH = 6.0
 REACH_HOVER_HEADING = -3.0
+# Wrist roll at the hold that tips the little-finger edge of the hand up off
+# the deck platter (see the F1 comment above). Sign is mirrored per side and
+# the term is applied to the wrist joint alone, so the wrist's world position -
+# and therefore the checked reach endpoint - does not move. Its magnitude was
+# chosen by sweeping the built-geometry population harness in
+# tests/reach_clearance.py, which carries the skinned hand mesh through every
+# pose: -8 deg already clears the worst pinky-mesh case; -12 keeps headroom for
+# the groove sway and still leaves the wrist well inside its 20 deg roll rail.
+REACH_HOLD_HAND_ROLL = -12.0
 REACH_SWING_OUT_HEADING = 10.0
 REACH_SWING_OUT_ROLL = -8.0
 # Cap on the reach's own upperarm abduction, below the joint's 60 deg guard
@@ -309,6 +343,39 @@ def _smoothstep(x: float) -> float:
 _LIFT_RISE = 0.22
 _LIFT_FALL = 0.92
 
+# Through the clearance<->target crossings the lift is held full, not run down
+# the attack trapezoid: F1 measured the *trailing* finger joints (pinky_03 ~160
+# mm behind the wrist) dipping ~1 mm past the round deck platter (radius 0.14)
+# and its base as the hand descended onto the control target *while still
+# crossing over them*. The platter footprint reaches in to x ~= 0.20 on the
+# hand's own side; the settled control hover sits at x ~= 0.13, clear of it.
+# Keeping the shoulder abducted and the wrist tilted up until the hand has
+# travelled inboard past the platter edge - and only then relaxing them, across
+# the still middle of the hold where the settled pose already clears the whole
+# furniture set by >3 cm - carries the trailing joints over the platter. The
+# four fractions below are points along the hold (0 at its start, 1 at its end):
+# the lift eases out over [_HOLD_LIFT_DOWN0, _HOLD_LIFT_DOWN1], is zero across
+# the still middle, and eases back in over [_HOLD_LIFT_UP0, _HOLD_LIFT_UP1] so
+# the release crossing also starts at full lift. The descent is delayed to
+# _HOLD_LIFT_DOWN0 (~ progress 0.43, hand at x ~= 0.19) so it happens inboard of
+# the platter, not over it. HOLD mid sits in the still middle, so the settled
+# endpoint the calibration and the reach-distance test check is unchanged.
+_HOLD_LIFT_DOWN0 = 0.28
+_HOLD_LIFT_DOWN1 = 0.42
+_HOLD_LIFT_UP0 = 0.58
+_HOLD_LIFT_UP1 = 0.72
+
+
+def _hold_lift(hold_u: float) -> float:
+    """Lift weight across the hold: full at both edges, zero across the middle."""
+    if hold_u <= _HOLD_LIFT_DOWN0 or hold_u >= _HOLD_LIFT_UP1:
+        return 1.0
+    if hold_u < _HOLD_LIFT_DOWN1:
+        return 1.0 - _smoothstep((hold_u - _HOLD_LIFT_DOWN0) / (_HOLD_LIFT_DOWN1 - _HOLD_LIFT_DOWN0))
+    if hold_u <= _HOLD_LIFT_UP0:
+        return 0.0
+    return _smoothstep((hold_u - _HOLD_LIFT_UP0) / (_HOLD_LIFT_UP1 - _HOLD_LIFT_UP0))
+
 # How much of the neutral->clearance leg is spent moving (the rest sits parked
 # at the clearance pose): ease to the lifted pose over most of the leg, then
 # hold. On the way back the clearance pose is instead held through the first
@@ -346,16 +413,21 @@ def _reach_phase_weights(progress: float) -> tuple[float, float, float, float]:
     blending ``IK_CLEARANCE`` and ``IK_REACH`` by these never needs to worry
     about the two "fighting" each other.
 
-    ``lift`` is 0 at neutral, at the final target and through the hold. On the
+    ``lift`` is 0 at neutral and across the still middle of the hold, and full
+    (1) through both clearance<->target crossings. On the first half of the
     *attack* it is a trapezoid (``_LIFT_RISE`` / ``_LIFT_FALL``) that leads the
     forward swing: the shoulder abducts and the forearm folds up (the clearance
     pose) before the hand travels out over the table, because measured against
     the real finger joints - not just the wrist - a path that gains height and
     forward reach together drags the trailing fingers through the slab as they
-    cross the table's near edge. On the *release* ``lift`` instead tracks
-    ``w_clear`` back down (``_LIFT_RELEASE_RAMP``), so the abduction relaxes
-    only as the hand actually returns toward neutral; an earlier timer-based
-    fall dropped the arm while it was still swung out over the table.
+    cross the table's near edge. Through the clearance->target crossing it stays
+    full and only eases out once the hand is settled inboard of the deck platter
+    (``_hold_lift``), because the trailing fingers were measured grazing the
+    round platter as the hand descended onto the target while still over it. It
+    eases back in over the last of the hold so the target->clearance crossing
+    starts lifted too; on the final *clearance->neutral* leg it tracks
+    ``w_clear`` back down (``_LIFT_RELEASE_RAMP``), so the abduction relaxes only
+    as the hand actually returns toward neutral.
 
     ``swing`` is a 0..1..0 plateau nonzero *only* on the two neutral<->clearance
     legs, at full through the middle of each. It drives the detour terms
@@ -387,17 +459,22 @@ def _reach_phase_weights(progress: float) -> tuple[float, float, float, float]:
             # keeps the trailing fingers from dragging through the slab.
             w_clear = _smoothstep(progress / (half_attack * _WAYPOINT_SNAP))
             return w_clear, 0.0, lift, _plateau((w_clear - 0.05) / 0.90, 0.22, 0.80)
-        # clearance -> target
+        # clearance -> target: hold the lift full for the whole crossing (see
+        # _HOLD_LIFT_RISE) - the trailing fingers are still over the platter here.
         t = _smoothstep((progress - half_attack) / half_attack)
-        return 1.0 - t, t, lift, 0.0
+        return 1.0 - t, t, 1.0, 0.0
     if progress < hold_end:
-        # hold at target
-        return 0.0, 1.0, 0.0, 0.0
+        # hold at target: relax the lift only through the still middle of the
+        # hold, full again at both edges so both crossings are covered.
+        hold_u = (progress - attack) / hold
+        return 0.0, 1.0, _hold_lift(hold_u), 0.0
     # target -> clearance -> neutral
     release_progress = progress - hold_end
     if release_progress < half_release:
         t = _smoothstep(release_progress / half_release)
-        return t, 1.0 - t, _trapezoid_lift(1.0 - release_progress / release), 0.0
+        # Mirror of the attack crossing: lift stays full until the hand is back
+        # at the clearance pose and clear of the platter.
+        return t, 1.0 - t, 1.0, 0.0
     # clearance -> neutral: hold the clearance pose through _RELEASE_HOLD of
     # this leg, then drop to neutral over what remains. The lift roll follows
     # w_clear down rather than the clock, so it is still full while the hand is
@@ -459,6 +536,12 @@ def pose_offsets(state: DJActionState, targets: DJWorkstationTargets) -> Offsets
         reach_presence = w_clear + w_target
         lift_roll = CLEARANCE_LIFT_ROLL * lift * _SIDE_SIGN[side]
         hover_heading = REACH_HOVER_HEADING * _SIDE_SIGN[side] * w_target
+        # Wrist-only: tips the pinky edge of the hand up off the deck platter
+        # during the hold and the crossings. Rotates about the wrist, so
+        # ``hand_{side}``'s world position (the checked reach endpoint) is
+        # unchanged. NOT strength-scaled - a timid low-energy reach is exactly
+        # where the pinky joints were measured grazing the platter.
+        hold_hand_roll = REACH_HOLD_HAND_ROLL * _SIDE_SIGN[side] * w_target
         swing_heading = REACH_SWING_OUT_HEADING * _SIDE_SIGN[side] * swing
         swing_roll = REACH_SWING_OUT_ROLL * _SIDE_SIGN[side] * swing
         # The wrist reaches full base pitch by the time the hand is ~40% of the
@@ -496,7 +579,7 @@ def pose_offsets(state: DJActionState, targets: DJWorkstationTargets) -> Offsets
         # (low-energy) reach needs it just as much as an emphatic one - the
         # low-strength cases are exactly where the un-posed fingertips were
         # measured grazing the tabletop.
-        _add(offsets, f"hand_{side}", pitch=hand_pitch)
+        _add(offsets, f"hand_{side}", pitch=hand_pitch, roll=hold_hand_roll)
         _add(offsets, clavicle, pitch=REACH_CLAVICLE_PITCH * reach_presence * strength_scale)
 
     elif state.action == "small_hype":

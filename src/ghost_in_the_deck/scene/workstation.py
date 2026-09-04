@@ -42,7 +42,7 @@ from .primitives import box, cylinder
 # second, independent number.
 LEG_SIZE = TABLE_TOP_THICKNESS
 
-DECK_RADIUS = 0.115
+DECK_RADIUS = 0.14
 DECK_HEIGHT = CONTROLLER_THICKNESS
 
 MIXER_WIDTH = 0.30

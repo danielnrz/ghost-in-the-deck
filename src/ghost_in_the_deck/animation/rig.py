@@ -90,10 +90,11 @@ class AvatarRig:
         # 60.
         "lowerarm_l": (15.0, 60.0, 15.0),
         "lowerarm_r": (15.0, 60.0, 15.0),
-        # Wrist: only hand_to_deck moves it, and only in pitch (fingers up
+        # Wrist: only hand_to_deck moves it - mostly in pitch (fingers up
         # across the controls - base tilt plus a transient extra while crossing
-        # the slab, ~55 deg peak). The bound is the guard rail for that one
-        # gesture, not an anatomical claim.
+        # the slab, ~55 deg peak) and a smaller hold-time roll (~12 deg) that
+        # tips the pinky edge up off the deck platter. The bounds are the guard
+        # rails for that one gesture, not an anatomical claim.
         "hand_l": (20.0, 60.0, 20.0),
         "hand_r": (20.0, 60.0, 20.0),
         "thigh_l": (10.0, 15.0, 10.0),
