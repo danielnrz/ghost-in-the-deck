@@ -113,7 +113,13 @@ def _build_deck(root: NodePath, center) -> None:
     x, y, top_z = center
     base = box(DECK_RADIUS * 2.2, DECK_RADIUS * 2.2, DECK_HEIGHT * 0.4, DECK_COLOR)
     base.reparentTo(root)
-    base.setPos(x - DECK_RADIUS * 1.1, y - DECK_RADIUS * 1.1, top_z - DECK_HEIGHT)
+    # box() is centred on X and Y (see primitives.box), so a box centred on the
+    # platter is just setPos(x, y, ...) - no half-extent offset. Earlier code
+    # subtracted a half-width here (and in the mixer and control panels below),
+    # a leftover from assuming corner-origin geometry; it left every slab
+    # sitting half its own width off the piece it belongs to, which is what let
+    # the right hand's reach pass through the mis-placed central mixer.
+    base.setPos(x, y, top_z - DECK_HEIGHT)
 
     platter = cylinder(DECK_RADIUS, DECK_HEIGHT * 0.6, (0.25, 0.25, 0.27, 1.0))
     platter.reparentTo(root)
@@ -124,7 +130,7 @@ def _build_mixer(root: NodePath, center) -> None:
     x, y, top_z = center
     body = box(MIXER_WIDTH, MIXER_DEPTH, MIXER_HEIGHT, MIXER_COLOR)
     body.reparentTo(root)
-    body.setPos(x - MIXER_WIDTH / 2, y - MIXER_DEPTH / 2, top_z - MIXER_HEIGHT)
+    body.setPos(x, y, top_z - MIXER_HEIGHT)
 
     for i in range(3):
         knob = cylinder(KNOB_RADIUS, KNOB_HEIGHT, KNOB_COLOR)
@@ -154,7 +160,7 @@ def _build_control_cluster(root: NodePath, target, label: str) -> None:
     panel = box(CONTROL_PANEL_WIDTH, CONTROL_PANEL_DEPTH, CONTROL_PANEL_HEIGHT, CONTROL_PANEL_COLOR)
     panel.setName(f"control-panel-{label}")
     panel.reparentTo(cluster)
-    panel.setPos(x - CONTROL_PANEL_WIDTH / 2, y - CONTROL_PANEL_DEPTH / 2, top_z - CONTROL_PANEL_HEIGHT)
+    panel.setPos(x, y, top_z - CONTROL_PANEL_HEIGHT)
 
     knob = cylinder(KNOB_RADIUS * 1.3, KNOB_HEIGHT, KNOB_COLOR)
     knob.setName(f"control-knob-{label}")

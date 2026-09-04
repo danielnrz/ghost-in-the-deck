@@ -30,9 +30,13 @@ from panda3d.core import NodePath
 class AvatarRig:
     """Wraps an Actor and exposes a small set of directly driven joints."""
 
-    # Everything the groove drives. Fingers, feet and toes are deliberately left
-    # out: they are hard to move convincingly and a bad foot reads worse than a
-    # still one.
+    # Everything the groove drives, plus the two wrists. Individual fingers,
+    # feet and toes are deliberately left out: they are hard to move
+    # convincingly and a bad foot reads worse than a still one. ``hand_l`` /
+    # ``hand_r`` are driven only by ``hand_to_deck`` (Phase 1B.2): the reach
+    # needs to pitch the whole hand up so the fifteen un-posed finger joints it
+    # carries angle across the controls instead of draping down into them. The
+    # groove itself never writes to a wrist.
     CONTROLLED = (
         "pelvis",
         "spine_01",
@@ -46,6 +50,8 @@ class AvatarRig:
         "upperarm_r",
         "lowerarm_l",
         "lowerarm_r",
+        "hand_l",
+        "hand_r",
         "thigh_l",
         "thigh_r",
         "calf_l",
@@ -71,10 +77,25 @@ class AvatarRig:
         "head": (22.0, 22.0, 15.0),
         "clavicle_l": (12.0, 15.0, 12.0),
         "clavicle_r": (12.0, 15.0, 12.0),
-        "upperarm_l": (25.0, 25.0, 45.0),
-        "upperarm_r": (25.0, 25.0, 45.0),
-        "lowerarm_l": (15.0, 35.0, 15.0),
-        "lowerarm_r": (15.0, 35.0, 15.0),
+        # Roll is arm abduction - lifting the whole arm out from the body.
+        # hand_to_deck's clearance pose needs a real lift to carry the trailing
+        # finger joints over the tabletop's near edge (Phase 1B.2 F1); 55 is
+        # that headroom, still far short of a shoulder's true abduction range
+        # and well clear of small_hype's 42.
+        "upperarm_l": (25.0, 25.0, 60.0),
+        "upperarm_r": (25.0, 25.0, 60.0),
+        # Elbow flexion. The reach's own bend needs ~40; the clearance pose
+        # folds the forearm further up (CLEARANCE_ELBOW_PITCH, -60) to carry the
+        # hand clear of the table without swinging it out, so the guard rail is
+        # 60.
+        "lowerarm_l": (15.0, 60.0, 15.0),
+        "lowerarm_r": (15.0, 60.0, 15.0),
+        # Wrist: only hand_to_deck moves it, and only in pitch (fingers up
+        # across the controls - base tilt plus a transient extra while crossing
+        # the slab, ~55 deg peak). The bound is the guard rail for that one
+        # gesture, not an anatomical claim.
+        "hand_l": (20.0, 60.0, 20.0),
+        "hand_r": (20.0, 60.0, 20.0),
         "thigh_l": (10.0, 15.0, 10.0),
         "thigh_r": (10.0, 15.0, 10.0),
         "calf_l": (8.0, 20.0, 8.0),
