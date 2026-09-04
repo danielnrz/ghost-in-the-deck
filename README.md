@@ -361,22 +361,32 @@ Phase 1B.2's own finding was that all of this was being *checked* on the wrist
 alone. The rig carries fifteen un-posed finger joints per hand (the furthest
 ~160 mm past the wrist) that drive the visible hand mesh, and at the hold they
 were buried up to 25 mm in the tabletop. `tests/reach_clearance.py` is the new
-guard. It reads the character's skinning table once, buckets every hand-mesh
-vertex onto the joint it follows, and then carries that **actual mesh** through
-a documented population of real scheduled events - both sides, several tempos,
+guard. It reads the character's skinning table once, buckets the farthest
+vertices of each hand-mesh joint's *predominant* blend weight onto that joint,
+and carries that rigid, per-joint approximation of the mesh through a
+documented population of real scheduled events - both sides, several tempos,
 energies and seeds, groove composed on top - measuring it against the *built*
 workstation (boxes and vertical cylinders from `getTightBounds`, not the
 analytic formulas). `test_reach_trajectory.py` asserts a real margin on every
-run. Because the guard now measures the painted surface rather than a skeleton
-pivot, the threshold is just residual model error (~6 mm): the skinned hand
-mesh clears every piece of furniture - tabletop, legs, deck platters and their
-bases - by more than 2 cm across the whole population, worst case a low-energy
+run. It is an approximation, not the true blended mesh - rigid single-joint
+skinning ignores the real multi-joint blend near the knuckles - so the
+threshold (`SAFETY_MARGIN`, 8 mm) is sized to cover that approximation's own
+measured error (an independent full linear-blend reconstruction of the
+reported worst event read ~3.7 mm lower than the rigid proxy there) on top of
+the smaller box/cylinder and vertex-truncation effects; see
+`tests/reach_clearance.py`'s own `SAFETY_MARGIN` comment for the itemised
+sum. Reported margins: the rigid proxy this repo sweeps clears the built
+furniture - tabletop, legs, deck platters and their bases - by +22.3 mm
+(committed population) / +22.7 mm (denser resample), worst case a low-energy
 reach whose little finger passes near the left deck platter (that platter's
-edge sits ~29 mm from the side control the hand is operating). Deliberate
-near-contact with the knob the hand *works* is a separate, separately named
-allowance. `scripts/solve_arm_ik.py` derives the calibration;
-`scripts/measure_hand_skin.py` dumps the per-joint skin radii; `gesture_pose.py`'s
-module docstring has the full account.
+edge sits ~29 mm from the side control the hand is operating); the
+independent full-blend reconstruction of that same worst event read a more
+conservative +19.9 mm there - still clear, but under 2 cm, not "more than
+2 cm across the whole population" as an earlier draft of this section claimed.
+Deliberate near-contact with the knob the hand *works* is a separate,
+separately named allowance. `scripts/solve_arm_ik.py` derives the
+calibration; `scripts/measure_hand_skin.py` dumps the per-joint skin radii;
+`gesture_pose.py`'s module docstring has the full account.
 
 The workstation gained real geometry to match: `left_controls`/`right_controls`
 - what `hand_to_deck` was always reaching toward - previously had nothing

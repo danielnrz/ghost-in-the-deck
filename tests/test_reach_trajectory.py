@@ -568,12 +568,14 @@ class TestReachLegFrameRate(unittest.TestCase):
 
 @unittest.skipUnless(ASSET.is_file(), "avatar asset not built")
 class TestHandFingerClearancePopulation(unittest.TestCase):
-    """F1: the committed clearance guard - the *skinned hand mesh* (every vertex
-    the wrist and fifteen finger joints carry) against the *built* workstation,
-    swept over a documented population of real scheduled hand_to_deck events
-    with the groove composed on top. See tests/reach_clearance.py for the
-    population, the box/cylinder solid model, the mesh measurement and the
-    justification of both margins."""
+    """F1: the committed clearance guard - a rigid, per-joint approximation of
+    the skinned hand mesh (the farthest ``_SKIN_VERTS_PER_JOINT`` vertices the
+    wrist and each of the fifteen finger joints carry, not every vertex)
+    against the *built* workstation, swept over a documented population of
+    real scheduled hand_to_deck events with the groove composed on top. See
+    tests/reach_clearance.py for the population, the box/cylinder solid
+    model, the approximation's measured error against a full linear-blend
+    reconstruction, and the justification of both margins."""
 
     @classmethod
     def setUpClass(cls):

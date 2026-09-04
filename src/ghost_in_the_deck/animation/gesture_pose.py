@@ -98,9 +98,10 @@ exactly where the fingertip joints were measured grazing it.
 ``CLEARANCE_LIFT_ROLL``'s magnitude is derived end to end by
 ``scripts/solve_arm_ik.py`` (see its comment); every term is re-checked
 against the real composed pose - groove included, the full scheduled event
-population - by ``tests/reach_clearance.py``, which carries the actual skinned
-hand mesh through each pose and asserts a real margin against the built
-workstation on every test run.
+population - by ``tests/reach_clearance.py``, which carries a rigid,
+per-joint approximation of the skinned hand mesh through each pose and
+asserts a real margin, sized to cover that approximation's own measured
+error, against the built workstation on every test run.
 
 small_hype is asymmetric - one arm, chosen by the scheduled event's own
 ``side`` - rather than both arms mirrored. An earlier symmetric version read

@@ -16,14 +16,21 @@ never the closest point of the hand to the furniture, and the reach cannot put
 every finger *pivot* 40 mm from the left deck platter without swinging the
 wrist out of its calibrated 5-8 cm hover band, because the left control
 cluster the hand operates sits only ~29 mm from that platter's edge. So this
-harness now measures the **skinned hand mesh itself**: at build time it reads
-the character's transform-blend table, assigns each mesh vertex to the hand
-joint it is skinned predominantly to (blend weight >= 0.5), and stores that
-vertex in the joint's own local frame. During the sweep every stored vertex
-is carried rigidly by its joint's live world transform and measured against
-the built geometry. That is the surface a viewer actually sees, so the guard
-no longer needs a skin allowance bolted onto the threshold - the allowance is
-in the measurement.
+harness now measures a **rigid, per-joint approximation of the skinned hand
+mesh**: at build time it reads the character's transform-blend table, assigns
+each mesh vertex to the hand joint it is skinned *predominantly* to (blend
+weight >= 0.5, so it ignores the real multi-joint blending near the
+knuckles), keeps only the farthest ``_SKIN_VERTS_PER_JOINT`` vertices per
+joint, and stores those in the joint's own local frame. During the sweep each
+stored vertex is carried rigidly by its one joint's live world transform (not
+blended across the joints that actually influence it) and measured against
+the built geometry. This is close to the surface a viewer actually sees, not
+identical to it: an independent full linear-blend reconstruction of the
+reported worst event measured this rigid proxy about 3.7 mm more generous
+than the true blended mesh there. ``SAFETY_MARGIN`` below is sized to cover
+that gap (and the other, smaller sources of model error) rather than assuming
+it away, so the guard still does not need a skin allowance bolted onto its
+threshold on top of the measurement itself - the allowance is in the margin.
 
 The geometry is the **built** scene (``getTightBounds`` on the actually
 constructed nodes), not the analytic ``animation.workstation`` formulas (those
@@ -117,25 +124,35 @@ _OPERATED_TOP_Z = 0.995
 # --------------------------------------------------------------- the margins
 # SAFETY_MARGIN - furniture (the tabletop, its legs, the deck platters and
 # their bases): structures the hand only passes over, never operates. Because
-# this harness now measures the *skinned mesh* (see the module docstring), the
-# painted-hand skin allowance is already in the measurement and this threshold
-# is only the residual model error, all of it in the conservative direction:
+# this harness measures a rigid per-joint approximation of the skinned mesh
+# (see the module docstring), not the true blended mesh, this threshold has to
+# cover the approximation's own error as well as the smaller box/cylinder and
+# truncation effects - all three push the reported margin more positive than
+# the true one, so they are additive in the worst case:
 #
+#   * rigid skinning (weight >= 0.5, one joint per vertex, no multi-joint
+#     blend near the knuckles) - measured directly, by reconstructing the true
+#     linear-blend position of the reported worst-event vertex and comparing:
+#     the rigid proxy read **3.7 mm** more generous than the blended mesh
+#     there. This is the dominant term, not a sub-millimetre one;
 #   * the box / capped-cylinder solids from ``getTightBounds`` are convex
-#     supersets that sit ~1-3 mm proud of the faceted render mesh they stand in
-#     for;
-#   * rigid skinning (weight >= 0.5, one joint per vertex) ignores the minor
-#     multi-joint blend near the knuckles - a sub-millimetre effect on the
-#     distal joints that reach the furniture;
-#   * only the 48 farthest vertices per joint are carried, so the sampled
-#     surface can undercut the true nearest point by a fraction of a mm.
+#     supersets that sit ~1-3 mm proud of the faceted render mesh they stand
+#     in for;
+#   * only the farthest ``_SKIN_VERTS_PER_JOINT`` (32) vertices per joint are
+#     carried, so the sampled surface can undercut the true nearest point by a
+#     fraction of a mm (raising it to the full ~120/joint moves the worst
+#     margin by < 0.3 mm - see that constant's own comment).
 #
-# 6 mm covers all three with room to spare. A measured mesh margin above +6 mm
-# means the visible hand is outside the furniture with margin left over; below
-# it means the render mesh is at or through a furniture face. Re-check the
-# per-joint skin radii with ``scripts/measure_hand_skin.py`` if the asset
-# changes.
-SAFETY_MARGIN = 0.006   # metres, worst furniture mesh margin must exceed this
+# 3.7 + 3 (the high end of the box/cylinder range) + 0.3 = 7.0 mm worst case,
+# so the previous 6 mm threshold was not actually provably covering it even
+# though every measured margin has cleared both. 8 mm covers the itemised 7.0
+# mm with a little room to spare without needing the population's worst
+# reported margin (currently +22-24 mm) to move at all. A measured mesh margin
+# above +8 mm means the true blended hand mesh is outside the furniture with
+# margin left over even under the worst-case combination of these three
+# errors; below it, the guard can no longer prove that. Re-check the per-joint
+# skin radii with ``scripts/measure_hand_skin.py`` if the asset changes.
+SAFETY_MARGIN = 0.008   # metres, worst furniture mesh margin must exceed this
 
 # CONTROL_CONTACT_MARGIN - operated controls (the central mixer, the two side
 # control clusters: panel + knob + fader). The knobs and faders stand 12-20 mm
