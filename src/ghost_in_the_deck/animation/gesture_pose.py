@@ -208,9 +208,9 @@ IK_CLEARANCE = {
 #   CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL, and
 #   test_reach_trajectory.py asserts exactly that, so the number cannot drift
 #   and its provenance is one re-runnable script plus one named constant.
-LIFT_ROLL_KNEE = -32.0
+LIFT_ROLL_KNEE = -34.0
 COMPOSED_MARGIN_BUFFER_ROLL = -6.0
-CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -38.0
+CLEARANCE_LIFT_ROLL = LIFT_ROLL_KNEE + COMPOSED_MARGIN_BUFFER_ROLL   # -40.0
 
 # Phase 1B.2 finding F1: the wrist clears the workstation, but the fifteen
 # un-posed finger joints each hand carries (the furthest, ``middle_03``, ~160
