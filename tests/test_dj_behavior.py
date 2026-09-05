@@ -7,6 +7,7 @@ without one, matching the pattern the rest of the project already uses.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import unittest
 
@@ -15,9 +16,16 @@ from ghost_in_the_deck.animation.dj_behavior import (
     ACTIONS,
     DJActionState,
     DJBehaviorEngine,
+    GestureEvent,
     _envelope_weight,
 )
 from ghost_in_the_deck.animation import gesture_pose
+from ghost_in_the_deck.dj_planner import (
+    DJActionPlanner,
+    context_at,
+    decide_gesture_kind,
+    planned_strength,
+)
 from ghost_in_the_deck.animation.groove import GrooveEngine
 from ghost_in_the_deck.animation.rig import AvatarRig
 from ghost_in_the_deck.animation.workstation import DEFAULT_TARGETS
@@ -44,13 +52,16 @@ def rig_pair():
 class TestDeterministicSchedule(unittest.TestCase):
     """1. The schedule is built once and is a pure function of the track."""
 
-    def test_same_track_gives_the_same_schedule(self):
+    def test_same_track_gives_a_byte_identical_schedule_twice(self):
+        """Every field of every event - start, duration, kind, side, strength -
+        reproduces exactly from the same features and seed."""
         first = behavior_for(BEATS, duration=DURATION, bpm=BPM, seed="reproduce")
         second = behavior_for(BEATS, duration=DURATION, bpm=BPM, seed="reproduce")
         self.assertEqual(
-            [(e.start, e.duration, e.kind, e.side) for e in first.events],
-            [(e.start, e.duration, e.kind, e.side) for e in second.events],
+            [dataclasses.astuple(e) for e in first.events],
+            [dataclasses.astuple(e) for e in second.events],
         )
+        self.assertTrue(first.events, "fixture produced no events to compare")
 
     def test_different_tracks_get_different_schedules(self):
         one = behavior_for(BEATS, duration=DURATION, bpm=BPM, seed="track-a")
@@ -262,39 +273,116 @@ class TestEnvelopeContinuity(unittest.TestCase):
                     self.assertLess(worst, 0.05, f"pose jumped {worst:.4f} deg at a boundary")
 
 
-class TestEnergyContext(unittest.TestCase):
-    """7 & 8. Low energy suppresses hype; high (relative) energy enables it."""
+class TestKindSideStrengthComeFromThePlanner(unittest.TestCase):
+    """7 & 8. Every scheduled event's kind, side and strength are exactly the
+    planner's deterministic decision for the musical context at that event's own
+    start - not an independent weighted-random roll. This is the contract Phase
+    2B introduced when it deleted DJBehaviorEngine's old _choose_kind: the
+    visible gesture and the audio action dj_planner plans for the same moment
+    are two readings of one decision.
+    """
 
-    def test_low_energy_section_has_no_hype(self):
-        beats = regular_beats(bpm=BPM, count=BEAT_COUNT * 2, offset=0.5)
-        long_duration = DURATION * 2
+    LONG_BEATS = regular_beats(bpm=BPM, count=BEAT_COUNT * 2, offset=0.5)
+    LONG_DURATION = DURATION * 2
 
-        def profile(t):
-            return 0.05 if t < long_duration * 0.5 else 0.9
+    ENERGY_PROFILES = {
+        "flat": None,
+        "quiet": 0.05,
+        "loud": 0.95,
+        "quiet-then-loud": (lambda t: 0.03 if t < DURATION else 0.95),
+        "rising": (lambda t: min(0.97, 0.02 + 0.95 * (t / (DURATION * 2)))),
+    }
 
-        engine = behavior_for(beats, duration=long_duration, bpm=BPM, seed="low-e", energy=profile)
-        quiet = [e for e in engine.events if e.start < long_duration * 0.48]
-        self.assertTrue(quiet, "fixture produced no events in the quiet section")
-        self.assertEqual(sum(1 for e in quiet if e.kind == "small_hype"), 0)
+    def _engine(self, name):
+        return behavior_for(
+            self.LONG_BEATS,
+            duration=self.LONG_DURATION,
+            bpm=BPM,
+            seed=f"planner-{name}",
+            energy=self.ENERGY_PROFILES[name],
+        )
 
-    def test_loud_section_produces_more_hype_than_quiet_section(self):
-        beats = regular_beats(bpm=BPM, count=BEAT_COUNT * 2, offset=0.5)
-        long_duration = DURATION * 2
+    def test_each_event_kind_side_strength_is_the_planner_decision_at_its_start(self):
+        seen_kinds = set()
+        for name in self.ENERGY_PROFILES:
+            engine = self._engine(name)
+            self.assertTrue(engine.events, f"{name} profile produced no events")
+            planner = DJActionPlanner(engine.seed)
+            for event in engine.events:
+                context = context_at(engine.energy, event.start)
+                expected_kind = decide_gesture_kind(context)
+                with self.subTest(profile=name, start=round(event.start, 3)):
+                    self.assertEqual(event.kind, expected_kind)
+                    self.assertEqual(
+                        event.side,
+                        planner.gesture_side_for(expected_kind, event.start),
+                    )
+                    self.assertEqual(event.strength, planned_strength(context))
+                seen_kinds.add(event.kind)
+        # The per-event equality above is only meaningful if the profiles between
+        # them actually exercise more than one branch of decide_gesture_kind.
+        self.assertGreaterEqual(len(seen_kinds), 2, sorted(seen_kinds))
 
-        def profile(t):
-            return 0.05 if t < long_duration * 0.5 else 0.9
+    def test_a_low_band_moment_never_schedules_small_hype(self):
+        """The energy-context guarantee, stated as exact per-event equality
+        rather than a distribution: at a low-band moment decide_gesture_kind
+        returns deck_glance or lean_in, so no event placed there is small_hype."""
+        engine = behavior_for(
+            self.LONG_BEATS,
+            duration=self.LONG_DURATION,
+            bpm=BPM,
+            seed="low-band",
+            energy=lambda t: 0.02 if t < DURATION else 0.95,
+        )
+        low_events = [
+            e
+            for e in engine.events
+            if context_at(engine.energy, e.start).energy_band == "low"
+        ]
+        self.assertTrue(low_events, "fixture produced no low-band events")
+        for event in low_events:
+            with self.subTest(start=round(event.start, 3)):
+                self.assertIn(event.kind, ("deck_glance", "lean_in"))
+                self.assertEqual(
+                    event.kind,
+                    decide_gesture_kind(context_at(engine.energy, event.start)),
+                )
 
-        engine = behavior_for(beats, duration=long_duration, bpm=BPM, seed="high-e", energy=profile)
-        quiet = [e for e in engine.events if e.start < long_duration * 0.48]
-        loud = [e for e in engine.events if e.start > long_duration * 0.52]
-        quiet_hype = sum(1 for e in quiet if e.kind == "small_hype")
-        loud_hype = sum(1 for e in loud if e.kind == "small_hype")
-        self.assertGreater(loud_hype, quiet_hype)
+    def test_a_high_band_moment_always_schedules_small_hype(self):
+        engine = behavior_for(
+            self.LONG_BEATS,
+            duration=self.LONG_DURATION,
+            bpm=BPM,
+            seed="high-band",
+            energy=lambda t: 0.02 if t < DURATION else 0.95,
+        )
+        high_events = [
+            e
+            for e in engine.events
+            if context_at(engine.energy, e.start).energy_band == "high"
+        ]
+        self.assertTrue(high_events, "fixture produced no high-band events")
+        for event in high_events:
+            with self.subTest(start=round(event.start, 3)):
+                self.assertEqual(event.kind, "small_hype")
 
-    def test_low_energy_favours_deck_glance_over_hype(self):
-        engine = behavior_for(BEATS, duration=DURATION, bpm=BPM, seed="restrained", energy=0.05)
-        counts = {kind: sum(1 for e in engine.events if e.kind == kind) for kind in ACTIONS}
-        self.assertGreaterEqual(counts["deck_glance"], counts["small_hype"])
+
+class TestPublicShapeUnchanged(unittest.TestCase):
+    """This phase changes only which kind is chosen - not the vocabulary of
+    kinds, nor the fields a GestureEvent carries."""
+
+    def test_actions_vocabulary_is_exactly_the_four_known_kinds(self):
+        self.assertEqual(
+            ACTIONS, ("deck_glance", "lean_in", "hand_to_deck", "small_hype")
+        )
+
+    def test_gesture_event_field_layout_is_unchanged(self):
+        self.assertEqual(
+            [f.name for f in dataclasses.fields(GestureEvent)],
+            ["start", "duration", "kind", "side", "strength"],
+        )
+        event = GestureEvent(2.0, 0.5, "lean_in", None, 0.7)
+        self.assertEqual(event.end, 2.5)
 
 
 class TestGestureFrequency(unittest.TestCase):
