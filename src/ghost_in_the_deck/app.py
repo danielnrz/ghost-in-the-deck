@@ -64,15 +64,25 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     is never served after either the audio or the seed/schedule that derives
     the sweep changes - the same principle ``decode._cache_path`` uses for
     the plain decode, extended to include what this stage adds on top.
+
+    A schedule with no hand_to_deck events at all has nothing to render:
+    returning ``wav`` itself (rather than writing a "processed" copy that
+    just re-encodes it) is what makes ``apply_hand_to_deck_effects``'s own
+    no-op contract - same values, same dtype - hold all the way out to what
+    actually gets played, instead of the file arriving at playback with a
+    different sample format than the one on disk.
     """
-    stat = wav.stat()
     events_key = "|".join(
         f"{e.start:.6f}:{e.duration:.6f}:{e.side}:{e.strength:.6f}"
         for e in behavior.events
         if e.kind == "hand_to_deck"
     )
+    if not events_key:
+        return wav
+
+    stat = wav.stat()
     key = (
-        f"{wav.resolve()}:{stat.st_size}:{int(stat.st_mtime)}:"
+        f"{wav.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:"
         f"{behavior.seed}:{events_key}"
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]

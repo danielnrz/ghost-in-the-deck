@@ -1,21 +1,33 @@
-"""Regressions for the Phase 1A.1 review findings.
+"""Regressions for review findings.
 
+Phase 1A.1:
 F1  bar phase jumped at virtual beat boundaries before the first detected beat
 F2  an arbitrarily tiny constant envelope produced medium movement
 F3  --debug-every 0 divided by zero
+
+Phase 1C correction round 1 (hand_to_deck audio effect):
+F3  a zero-event schedule reached playback re-encoded as PCM_16 instead of
+    being served as the untouched source file
+F4  the effect cache key truncated mtime to the second, so a same-size,
+    same-second file replacement could serve a stale render
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
+
+import numpy as np
+import soundfile as sf
 
 from ghost_in_the_deck.animation.controller import AvatarAnimator
 from ghost_in_the_deck.animation.cues import BeatTimeline
 from ghost_in_the_deck.animation.energy import AUDIBLE_RMS, SILENCE_RMS, EnergyTrack
 from ghost_in_the_deck.animation.groove import MIN_INTENSITY
+from ghost_in_the_deck.app import processed_audio_path
 
 from synthetic import RecordingRig, groove_for, make_features, regular_beats
 
@@ -221,6 +233,69 @@ class TestDebugArgumentValidation(unittest.TestCase):
         self.assertEqual(positive_int("240"), 240)
         with self.assertRaises(Exception):
             positive_int("0")
+
+
+class _FakeBehavior:
+    """Stands in for DJBehaviorEngine: processed_audio_path only reads these."""
+
+    def __init__(self, events, seed="test"):
+        self.events = events
+        self.seed = seed
+
+
+def _write_wav(path: Path, sample_count: int, amplitude: float) -> None:
+    t = np.arange(sample_count) / 44100.0
+    samples = (amplitude * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+    sf.write(str(path), samples, 44100, subtype="FLOAT")
+
+
+class TestHandToDeckEffectWiring(unittest.TestCase):
+    """Phase 1C correction round 1: F3 (no-op re-encoding) and F4 (stale cache)."""
+
+    def test_no_events_returns_the_source_file_untouched(self):
+        """F3: a schedule with no hand_to_deck events must not be rendered
+        into a PCM_16 copy - the source file itself is the correct output."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, 44100, 0.5)
+            before = wav.read_bytes()
+
+            result = processed_audio_path(wav, _FakeBehavior(events=[]))
+
+            self.assertEqual(result, wav)
+            self.assertEqual(wav.read_bytes(), before)
+
+    def test_stale_cache_is_not_served_after_a_same_second_replacement(self):
+        """F4: two different-content, same-size files that land in the same
+        integer second of mtime (but different nanoseconds) must not share a
+        cache entry."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        events = [GestureEvent(0.1, 0.2, "hand_to_deck", "l", 0.9)]
+        behavior = _FakeBehavior(events=events)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+
+            _write_wav(wav, 4410, 0.3)
+            import os
+            os.utime(wav, (1_700_000_000.1, 1_700_000_000.1))
+            first_target = processed_audio_path(wav, behavior)
+            first_bytes = first_target.read_bytes()
+
+            _write_wav(wav, 4410, 0.9)
+            os.utime(wav, (1_700_000_000.9, 1_700_000_000.9))
+            second_target = processed_audio_path(wav, behavior)
+
+            self.assertNotEqual(
+                first_target, second_target,
+                "same-second replacement reused the previous cache entry",
+            )
+            self.assertNotEqual(second_target.read_bytes(), first_bytes)
 
 
 if __name__ == "__main__":

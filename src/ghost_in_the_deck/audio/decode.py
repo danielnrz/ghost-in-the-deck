@@ -22,7 +22,7 @@ def ffmpeg_available() -> bool:
 
 def _cache_path(source: Path) -> Path:
     stat = source.stat()
-    key = f"{source.resolve()}:{stat.st_size}:{int(stat.st_mtime)}:{SAMPLE_RATE}"
+    key = f"{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{SAMPLE_RATE}"
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
     return CACHE_DIR / f"{source.stem}-{digest}.wav"
 
