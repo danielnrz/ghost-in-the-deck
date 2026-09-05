@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 1C**.
+This repository is currently at **Phase 1D**.
 
 ## Phase 0 scope
 
@@ -439,6 +439,54 @@ computed once offline from the fixed schedule, the same way the reach
 calibration and the beat/energy analysis are, not solved or adjusted at
 runtime.
 
+## A second gesture, a second effect (Phase 1D)
+
+Phase 1C tied exactly one gesture to the audio; the README's own known
+limitations were honest that the other three still changed nothing about the
+sound. Phase 1D closes that gap for a second one: every scheduled
+`small_hype` event now runs a deterministic gain riser over `audio/effects.py`'s
+new `apply_small_hype_effects`, so a hype gesture audibly lifts the track the
+same way `hand_to_deck` audibly reshapes it.
+
+`small_hype` was picked because the groundwork already existed: it already
+carries a `side` and a `strength` (the schedule reuses the same channel of
+per-bar draws as `hand_to_deck` for `side`, even though the riser itself does
+not use it), and its selection weights in `dj_behavior._kind_weights` are
+already energy-driven - strongly favoured at high energy, suppressed at low
+energy - so it already represents a distinct musical moment (an energy peak)
+from `hand_to_deck`'s "working a control" moment. That argued for a distinct
+*kind* of effect: an amplitude riser, not a second filter sweep.
+
+The riser multiplies every sample in the event's window by a gain that
+follows the *same* `ENVELOPE_SHAPE["small_hype"]` / `_envelope_weight` curve
+already driving the gesture's visual weight, scaled by the event's own
+`strength` - the identical "the effect and the gesture are the same curve"
+principle Phase 1C established, applied to a different kind of processing.
+Unlike a filter, a gain boost is not self-limiting: it can genuinely push a
+sample past whatever the dry audio already needed to represent, so bounding
+it to the dry window's own peak (the trick `hand_to_deck`'s filter uses) does
+not apply. Instead each window's boost is capped by that window's own
+*available headroom* to a fixed ceiling (`GAIN_RISER_CEILING`, nominal
+full-scale for normalised PCM): the target gain is
+`min(nominal_boost, ceiling / dry_peak)`, raised to match the dry peak if it
+already exceeds the ceiling. An already hot window (dry peak already at or
+above the ceiling) correctly gets little or no boost rather than clipping -
+by construction, not by clamping the result afterward.
+
+`app.processed_audio_path` composes this after the `hand_to_deck` sweep in
+the same offline render, and its cache key now folds in every `small_hype`
+event's own timing and strength as well (`side` is left out, since the riser
+does not read it - folding in a field an effect ignores would just force
+needless re-renders). A schedule with neither kind of event scheduled is
+still a full no-op: the source wav is served untouched, unchanged from Phase
+1C. This rides the same `--no-fx` switch as `hand_to_deck`; there is no new
+flag.
+
+What this phase does not claim: two of the four gesture kinds now touch audio,
+not four. `deck_glance` and `lean_in` still change nothing about the sound.
+There is still no EQ, no crossfader, no fader movement, and no live parameter
+control - both effects are computed once offline from the fixed schedule.
+
 ## Tests
 
 ```bash
@@ -454,8 +502,11 @@ Coverage: audio analysis, the exported avatar's mesh and skeleton, timeline
 lookup, the playback clock, timing statistics, gesture scheduling and pose
 composition, the `hand_to_deck` filter sweep (determinism, spectral direction
 per side, no leakage outside its own window, exact boundary silence, signal
-integrity over a population), and a pixel comparison of rendered frames
-proving the movement is actually visible.
+integrity over a population), the `small_hype` gain riser (determinism,
+located amplitude increase, no leakage, exact boundary identity, a headroom
+sweep including a near-full-scale case, and a combined schedule proving
+neither effect corrupts the other's window), and a pixel comparison of
+rendered frames proving the movement is actually visible.
 
 `test_timing.py` is the render-stall suite for the groove. It drives the real
 timeline and animator through 60/30/15/5 fps schedules and through 250 ms,
@@ -502,14 +553,14 @@ Two format notes, both learned the hard way:
 
 ## Known limitations
 
-- The gesture vocabulary is small, and only `hand_to_deck` does anything to
-  the audio: one filter sweep (low-pass on the left hand, high-pass on the
-  right), offline and deterministic, tied to that one gesture's own envelope.
-  `deck_glance`, `lean_in` and `small_hype` still change nothing about the
-  sound. There is no knob contact beyond that single effect, no fader
-  movement, no EQ bands, no crossfading, and no live parameter control - the
-  sweep is precomputed once per track from the fixed gesture schedule, not
-  solved or adjusted at runtime.
+- The gesture vocabulary is small, and only two of its four kinds do anything
+  to the audio: `hand_to_deck`'s filter sweep (low-pass on the left hand,
+  high-pass on the right) and `small_hype`'s gain riser, each offline and
+  deterministic, each tied to that one gesture's own envelope. `deck_glance`
+  and `lean_in` still change nothing about the sound. There is no knob
+  contact beyond those two effects, no fader movement, no EQ bands, no
+  crossfading, and no live parameter control - both are precomputed once per
+  track from the fixed gesture schedule, not solved or adjusted at runtime.
 - `hand_to_deck`'s IK targets a fixed point - the front control row - and its
   peak offsets are calibrated once, offline, against the arm at rest. It does
   not re-solve live against wherever the shoulder actually is once groove sway
