@@ -14,6 +14,10 @@ F4  the effect cache key truncated mtime to the second, so a same-size,
 Phase 1C correction round 2 (hand_to_deck audio effect):
 F5  the effect cache key carried no effect/schema version, so a render
     cached before an ``audio.effects`` change could still be served after it
+
+Phase 1C correction round 3 (hand_to_deck audio effect):
+F8  processed playback unconditionally re-encoded to PCM_16, silently
+    saturating valid FLOAT-format source samples above +-1
 """
 
 from __future__ import annotations
@@ -349,6 +353,37 @@ class TestHandToDeckEffectWiring(unittest.TestCase):
             self.assertNotEqual(
                 target_a, target_b,
                 "schedules differing below the sixth decimal shared a cache entry",
+            )
+
+    def test_a_float_source_above_full_scale_is_not_saturated_to_pcm16(self):
+        """F8: a FLOAT-format source wav is allowed to carry samples beyond
+        +-1 (unlike PCM formats, which cannot represent them at all). Writing
+        the processed render back as PCM_16 - as an earlier version of this
+        function unconditionally did - silently saturates such samples to
+        PCM_16's ceiling (~0.99997). Preserving the source's own subtype
+        must carry them through untouched."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "hot.wav"
+            t = np.arange(int(2.0 * 44100)) / 44100.0
+            samples = (1.2 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+            sf.write(str(wav), samples, 44100, subtype="FLOAT")
+
+            events = [GestureEvent(0.5, 0.6, "hand_to_deck", "l", 0.9)]
+            target = processed_audio_path(wav, _FakeBehavior(events=events))
+
+            info = sf.info(str(target))
+            self.assertEqual(
+                info.subtype, "FLOAT",
+                "processed render did not keep the source's FLOAT subtype",
+            )
+            processed, _ = sf.read(str(target), dtype="float64")
+            self.assertGreater(
+                float(np.max(np.abs(processed))), 1.05,
+                "full-scale FLOAT samples were saturated by a PCM_16 write",
             )
 
 
