@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 1B**.
+This repository is currently at **Phase 1C**.
 
 ## Phase 0 scope
 
@@ -394,6 +394,51 @@ visible at them. `scene/workstation.py` now builds a small control cluster
 (panel, knob, fader) directly from each of those two points, mirrored, so the
 hand visibly lands on something.
 
+## A gesture that touches the audio (Phase 1C)
+
+Through Phase 1B.2 the avatar's hand could land on a control, but nothing it
+did changed what was heard - the gesture and the track were two independent
+things playing at the same time. Phase 1C ties exactly one of them together:
+every scheduled `hand_to_deck` event now sweeps a real filter across the
+track's own audio, offline, before playback ever starts.
+
+`audio/effects.py` is a small, dependency-free (on Panda3D) module - plain
+PCM sample arrays and a sample rate in, the same array back out - implementing
+a one-pole low-pass and a one-pole high-pass filter. The one deliberate
+exception to "audio code only knows about audio" is that it imports
+`GestureEvent` and `dj_behavior._envelope_weight` directly from the animation
+layer (which has no Panda3D dependency of its own). That is not a layering
+slip: the whole point is that the filter's depth at time T and the gesture's
+visual weight at time T are *the same function call*, not two curves that were
+separately tuned to look similar. `side="l"` sweeps the low-pass down and back
+up - cutting highs; `side="r"` sweeps the high-pass up and back down - cutting
+lows, mirroring the workstation's own `left_controls`/`right_controls` split
+so the two hands audibly do different things. A one-pole filter's cutoff and
+its smoothing coefficient are two views of the same number; the module sweeps
+the coefficient directly because doing so makes "no effect" exact at both
+ends of a gesture's window by construction, not just small - see the module's
+own docstring for why that took an explicit boundary pin for the high-pass
+case and not the low-pass one.
+
+`app.py` renders this once per track, offline: `processed_audio_path` reads
+the decoded wav, runs it through `apply_hand_to_deck_effects` using the
+`DJBehaviorEngine`'s own event schedule, and caches the result under
+`cache/audio_fx/`, the same pattern `audio/decode.py` already uses for the
+plain decode. The cache key folds in the wav's identity and every
+`hand_to_deck` event's own timing, side and strength, so a stale render is
+never served after the track, the seed or the schedule changes. This only
+happens when a behaviour layer exists at all (`--no-actions` disables it, same
+as the gesture layer itself); `--no-fx` disables just the audio processing,
+for an A/B comparison against the same run with the same gestures but
+unprocessed sound.
+
+What this phase does not claim: there is still exactly one effect, tied to
+exactly one gesture, on one hand-mixed track at a time. There is no EQ, no
+crossfader, no fader movement, and no live parameter control - the sweep is
+computed once offline from the fixed schedule, the same way the reach
+calibration and the beat/energy analysis are, not solved or adjusted at
+runtime.
+
 ## Tests
 
 ```bash
@@ -407,8 +452,10 @@ an optional extra and skip when there is nothing there.
 
 Coverage: audio analysis, the exported avatar's mesh and skeleton, timeline
 lookup, the playback clock, timing statistics, gesture scheduling and pose
-composition, and a pixel comparison of rendered frames proving the movement is
-actually visible.
+composition, the `hand_to_deck` filter sweep (determinism, spectral direction
+per side, no leakage outside its own window, exact boundary silence, signal
+integrity over a population), and a pixel comparison of rendered frames
+proving the movement is actually visible.
 
 `test_timing.py` is the render-stall suite for the groove. It drives the real
 timeline and animator through 60/30/15/5 fps schedules and through 250 ms,
@@ -455,8 +502,14 @@ Two format notes, both learned the hard way:
 
 ## Known limitations
 
-- The gesture vocabulary is small and does not yet do anything to the audio
-  itself - no knob contact, no fader movement, no EQ, no crossfading.
+- The gesture vocabulary is small, and only `hand_to_deck` does anything to
+  the audio: one filter sweep (low-pass on the left hand, high-pass on the
+  right), offline and deterministic, tied to that one gesture's own envelope.
+  `deck_glance`, `lean_in` and `small_hype` still change nothing about the
+  sound. There is no knob contact beyond that single effect, no fader
+  movement, no EQ bands, no crossfading, and no live parameter control - the
+  sweep is precomputed once per track from the fixed gesture schedule, not
+  solved or adjusted at runtime.
 - `hand_to_deck`'s IK targets a fixed point - the front control row - and its
   peak offsets are calibrated once, offline, against the arm at rest. It does
   not re-solve live against wherever the shoulder actually is once groove sway
