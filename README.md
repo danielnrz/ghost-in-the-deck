@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 2B**.
+This repository is currently at **Phase 2C**.
 
 ## Phase 0 scope
 
@@ -564,10 +564,11 @@ What Phase 2B still does **not** do:
 - **No real musical-structure awareness.** The decision is still an energy
   band plus "energy now minus energy a few seconds ago". There is no build,
   drop, breakdown, section or phrase detection.
-- **No planner-owned timing.** Whether a bar hosts a gesture at all, and how
-  far apart gestures fall, is still `DJBehaviorEngine`'s own
-  activation/gap roll. The planner decides *what* an event is, not *when* one
-  happens; planner-owned timing is a later phase.
+- **No planner-owned timing yet.** Whether a bar hosts a gesture at all, and
+  how far apart gestures fall, is still `DJBehaviorEngine`'s own
+  activation/gap roll at this phase. The planner decides *what* an event is,
+  not *when* one happens; Phase 2C (below) moves that choice into the planner
+  too.
 - **No new audio.** `audio/effects.py` is unchanged. `deck_glance` and
   `lean_in` still carry no audio effect - by design, since neither the filter
   sweep nor the gain riser represents "glancing" or "leaning in".
@@ -575,6 +576,45 @@ What Phase 2B still does **not** do:
   are byte-for-byte as Phase 1B.2 left them. Only *which* kind gets chosen at a
   moment changed, not how any kind looks.
 - Still no two-track mixing, EQ, crossfader or live parameter control.
+
+## The planner picks the moment too (Phase 2C)
+
+Phase 2A and 2B moved *what* happens at an already-chosen bar into
+`dj_planner` - first the audio action, then the gesture kind, side and
+strength. `DJBehaviorEngine` still owned the bar *choice* itself: a flat
+per-bar activation roll and the gap/duration jitter around it, decided without
+looking at the music. Phase 2C moves that choice into the planner as well.
+
+`DJActionPlanner.plan_schedule` now owns the whole bar-walk
+`_build_schedule` used to run - the `start >= 1.0 s` eligibility floor, the
+per-bar activation roll, the `MIN_GAP_BARS` + jitter spacing, and the
+`BASE_DURATION` + jitter duration with its past-track-end drop. The activation
+roll is no longer flat: `activation_probability` reads the *same*
+`MusicalContext` the kind/side/strength decisions already use - a per-band
+base chance (`low` 0.28 / `mid` 0.42 / `high` 0.58, where `mid` is exactly the
+old flat `ACTIVATION_PROBABILITY` so a mid-energy stretch keeps today's event
+density) plus a `+0.15` boost when the short trend clears `TREND_RISING`,
+capped at 1.0. The same `trend > TREND_RISING` reading that already picks
+`lean_in` now also makes a rising passage host more events. `MIN_GAP_BARS`,
+the gap jitter and the duration jitter moved to `dj_planner` with the walk;
+`DJBehaviorEngine` no longer contains any activation, gap or duration-jitter
+logic, and `_build_schedule` is a one-line delegation to `plan_schedule`.
+
+What Phase 2C still does **not** do:
+
+- **Still no musical-structure awareness.** Candidate positions are the same
+  fixed bar grid `_build_schedule` always walked. There is no phrase, section,
+  build, drop or breakdown detection - `activation_probability` reads only the
+  smoothed energy band and "energy now minus energy a few seconds ago".
+- **Spacing and no-overlap guarantees are unchanged.** The same
+  `MIN_GAP_BARS`-plus-jitter minimum separation and the same drop of any event
+  that would run past the track end still apply; only *where* those constants
+  live and *how* the per-bar chance is computed changed.
+- **No new DSP effect.** `audio/effects.py` is byte-for-byte unchanged, and
+  there is still no two-track mixing, EQ, crossfader or live parameter
+  control.
+- **Gesture poses are unchanged.** `gesture_pose.py`, `arm_ik.py` and the rig
+  are as before; only which bar hosts a gesture, and how often, changed.
 
 ## Tests
 
@@ -599,7 +639,12 @@ neither effect corrupts the other's window), the DJ action planner
 audio decision being identical for two events that share only start/duration,
 band edges matching the imported constants, a deterministic sweep side, and
 `decide_gesture_kind` mapping each energy band - and a rising trend in the low
-band - to the expected kind), the planner-driven schedule
+band - to the expected kind), the planner-owned timing
+(`activation_probability` strictly increasing low -> mid -> high at a fixed
+trend, staying in `[0, 1]` and never zero, a trend exactly at `TREND_RISING`
+not yet counting as rising, the `+0.15` boost applied and capped; and a
+sustained-high-energy track firing more events than a sustained-low one while
+a quiet flat track still schedules at least one), the planner-driven schedule
 (every built event's `kind`, `side` and `strength` equal exactly
 `decide_gesture_kind` / `gesture_side_for` / `planned_strength` at that event's
 start across several energy profiles, a low-band moment never scheduling
@@ -688,17 +733,23 @@ Two format notes, both learned the hard way:
   solver or runtime finger IK, by design.
 - Gesture and audio-action selection reason about relative energy and a short
   trend, not real musical structure - no idea what a build-up, a drop or a
-  breakdown is. As of Phase 2B the trend is load-bearing: a rising one in the
-  low-energy band picks `lean_in` over `deck_glance` (and would fold into the
-  audio decision too once an effect represents a build). But it is still only
-  "energy now minus energy a few seconds ago", not structural awareness.
-- Gesture kind, side and strength and the audio action at a scheduled moment
-  are one planner decision (Phase 2B), read from the same musical context - the
-  old independent weighted-random kind roll is gone. What is *not* unified is
-  event timing: whether a bar hosts a gesture at all, and how far apart
-  gestures fall, is still `DJBehaviorEngine`'s own activation/gap roll,
-  untouched by the planner. The planner decides what an event is, not when one
-  happens; planner-owned timing is a later phase.
+  breakdown is. As of Phase 2B the trend is load-bearing in kind selection: a
+  rising one in the low-energy band picks `lean_in` over `deck_glance`. As of
+  Phase 2C the same `trend > TREND_RISING` reading also raises
+  `activation_probability`, so a rising passage hosts more events (and it would
+  fold into the audio decision too once an effect represents a build). But it
+  is still only "energy now minus energy a few seconds ago", not structural
+  awareness.
+- Gesture kind, side and strength, the audio action, *and* event timing at a
+  scheduled moment are now all planner decisions read from the same musical
+  context - kind/side/strength in Phase 2B, the bar choice itself in Phase 2C.
+  The old independent weighted-random kind roll and `DJBehaviorEngine`'s flat
+  activation/gap roll are both gone: `DJActionPlanner.plan_schedule` owns the
+  bar-walk and `activation_probability` scales the per-bar chance with the
+  energy band and a rising trend. What is still *not* modelled is musical
+  structure - the walk is the same fixed bar grid, with no phrase, section,
+  build or drop detection, and the `MIN_GAP_BARS` spacing and past-track-end
+  drop are unchanged.
 - Bars are assumed to be four beats. A track in another metre still grooves,
   and gestures still land on a bar boundary, but the wrong one.
 - Before the first detected beat and after the last, the beat grid is
