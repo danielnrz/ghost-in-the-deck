@@ -1,10 +1,13 @@
-"""Phase 3A subtask 1: the broad-structure signal.
+"""Phase 3A: the lightweight musical-structure layer.
 
 Proves that ``structure.structure_at`` is deterministic, that its broad trend is
 a genuinely longer-timescale reading than ``dj_behavior.trend_at``'s default
-3-second one (not a renamed copy), that all four honestly-named regimes are
-reachable, and that ``phrase_position`` is exactly ``bar_index`` folded into an
-assumed eight-bar cycle.
+3-second one (not a renamed copy) - stated as an actual divergence assertion,
+not merely exercised -, that all four honestly-named regimes are reachable on
+crafted profiles, that ``section_change_likelihood`` rises with the magnitude of
+the broad trend, and that ``phrase_position`` is exactly ``bar_index`` folded
+into an *assumed* eight-bar cycle - a periodicity convention this code asserts,
+never a detected phrase boundary.
 
 Runs entirely on synthetic features; no private music.
 """
@@ -154,8 +157,64 @@ class TestSectionChangeLikelihood(unittest.TestCase):
             self.assertGreaterEqual(ms.section_change_likelihood, 0.0)
             self.assertLessEqual(ms.section_change_likelihood, 1.0)
 
+    @staticmethod
+    def _ramp_over(width):
+        """0.05 -> 0.95 spread across ``width`` seconds, centred on t=150, flat
+        either side. A narrower window is a steeper broad move at the centre.
+        """
+        centre = 150.0
+
+        def profile(t):
+            frac = (t - (centre - width / 2.0)) / width
+            return 0.05 + 0.90 * min(max(frac, 0.0), 1.0)
+
+        return profile
+
+    def test_likelihood_rises_with_the_magnitude_of_the_broad_trend(self):
+        """A steeper broad move - up or down - must read as a higher
+        section-change likelihood. Built from ramps of decreasing width (so the
+        broad trend's magnitude at the sample point genuinely increases), not
+        from one profile poked at arbitrary times.
+        """
+        readings = []
+        for width in (220.0, 120.0, 70.0, 40.0, 22.0):
+            track, timeline = _broad(self._ramp_over(width))
+            ms = S.structure_at(track, timeline, 150.0)
+            readings.append((abs(ms.broad_trend), ms.section_change_likelihood))
+
+        # The narrower the ramp, the larger the broad trend we actually measured.
+        magnitudes = [m for m, _ in readings]
+        self.assertEqual(magnitudes, sorted(magnitudes))
+        self.assertGreater(magnitudes[-1], magnitudes[0] + 0.05)
+
+        # ... and section_change_likelihood is non-decreasing in that magnitude,
+        # strictly rising wherever it has not yet hit the clamp.
+        for (_m_lo, l_lo), (_m_hi, l_hi) in zip(readings, readings[1:]):
+            self.assertGreaterEqual(l_hi, l_lo)
+            if l_hi < 1.0:
+                self.assertGreater(l_hi, l_lo)
+        self.assertGreater(readings[-1][1], readings[0][1])
+
+        # A steep fall reads just as structural as a steep rise: the signal is
+        # the magnitude of the broad move, not its direction.
+        rise = self._ramp_over(40.0)
+        fall_track, fall_timeline = _broad(lambda t: 1.0 - rise(t))
+        falling = S.structure_at(fall_track, fall_timeline, 150.0)
+        self.assertLess(falling.broad_trend, 0.0)
+        self.assertGreater(falling.section_change_likelihood, readings[0][1])
+
 
 class TestPhrasePosition(unittest.TestCase):
+    """``phrase_position`` is a PERIODICITY ASSUMPTION, not a detected boundary.
+
+    ``PHRASE_LENGTH_BARS`` asserts a convention - "music phrases in eights" -
+    and ``phrase_position`` is nothing more than ``bar_index`` folded modulo
+    that constant. Nothing here measures the audio to find where phrases
+    actually begin, and (by design this phase) no decision reads the result.
+    These tests only pin down that the fold is arithmetically correct and that
+    the whole 0..PHRASE_LENGTH_BARS-1 cycle is traversed.
+    """
+
     def test_phrase_position_is_bar_index_modulo_phrase_length(self):
         track, timeline = _broad(lambda t: 0.3 + 0.5 * (t / DURATION))
         for t in [i * 0.5 for i in range(0, 600)]:

@@ -21,11 +21,14 @@ from ghost_in_the_deck.animation.dj_behavior import (
     trend_at,
 )
 from ghost_in_the_deck.animation.energy import EnergyTrack
+from ghost_in_the_deck.animation.structure import MusicalStructure
 from ghost_in_the_deck.dj_planner import (
     ACTIVATION_BASE,
     ACTIVATION_TREND_BOOST,
     AUDIO_ACTIONS,
     PLANNER_STRENGTH_FLOOR,
+    STRUCTURE_BUILD_BOOST,
+    STRUCTURE_RELEASE_DAMP,
     DJActionPlanner,
     MusicalContext,
     _band_for,
@@ -243,6 +246,124 @@ class TestActivationProbability(unittest.TestCase):
                 expected,
                 places=12,
             )
+
+
+class TestStructureAwareActivationProbability(unittest.TestCase):
+    """Phase 3A: when ``context.structure`` is present, the broad regime layers
+    one bounded adjustment onto ``activation_probability`` - busier during a
+    broad ``build``, quieter during a broad ``release``, untouched at ``peak`` /
+    ``stable`` - and the ``structure=None`` path stays byte-identical to Phase
+    2C. This is the macro-phase's single structure-aware timing decision.
+    """
+
+    BANDS = ("low", "mid", "high")
+
+    @staticmethod
+    def _structure(regime, broad_trend=0.0):
+        return MusicalStructure(
+            time=0.0,
+            bar_index=4,
+            phrase_position=4,
+            broad_energy=0.5,
+            broad_trend=broad_trend,
+            regime=regime,
+            section_change_likelihood=min(abs(broad_trend) / 0.3, 1.0),
+        )
+
+    def _ctx(self, band, trend=0.0, structure=None):
+        return MusicalContext(
+            time=0.0,
+            energy=0.5,
+            trend=trend,
+            energy_band=band,
+            at_bar_boundary=True,
+            structure=structure,
+        )
+
+    def test_structure_none_is_byte_identical_to_phase_2c(self):
+        for band in self.BANDS:
+            for trend in (-1.0, 0.0, TREND_RISING, TREND_RISING + 0.4, 9.0):
+                phase_2c = min(
+                    ACTIVATION_BASE[band]
+                    + (ACTIVATION_TREND_BOOST if trend > TREND_RISING else 0.0),
+                    1.0,
+                )
+                with self.subTest(band=band, trend=trend):
+                    self.assertEqual(
+                        activation_probability(self._ctx(band, trend)), phase_2c
+                    )
+                    # An explicit structure=None is the same as omitting it.
+                    self.assertEqual(
+                        activation_probability(
+                            self._ctx(band, trend, structure=None)
+                        ),
+                        phase_2c,
+                    )
+
+    def test_peak_and_stable_leave_the_phase_2c_value_untouched(self):
+        for regime in ("peak", "stable"):
+            for band in self.BANDS:
+                for trend in (0.0, TREND_RISING + 0.4):
+                    base = activation_probability(self._ctx(band, trend))
+                    with self.subTest(regime=regime, band=band, trend=trend):
+                        self.assertEqual(
+                            activation_probability(
+                                self._ctx(
+                                    band, trend, self._structure(regime)
+                                )
+                            ),
+                            base,
+                        )
+
+    def test_build_adds_exactly_the_boost_and_release_subtracts_exactly_the_damp(self):
+        for band in self.BANDS:
+            for trend in (0.0, TREND_RISING + 0.4):
+                base = activation_probability(self._ctx(band, trend))
+                build = activation_probability(
+                    self._ctx(band, trend, self._structure("build"))
+                )
+                release = activation_probability(
+                    self._ctx(band, trend, self._structure("release"))
+                )
+                with self.subTest(band=band, trend=trend):
+                    self.assertAlmostEqual(
+                        build, min(base + STRUCTURE_BUILD_BOOST, 1.0), places=12
+                    )
+                    self.assertAlmostEqual(
+                        release, base - STRUCTURE_RELEASE_DAMP, places=12
+                    )
+
+    def test_a_broad_build_is_busier_than_a_broad_release_everywhere(self):
+        for band in self.BANDS:
+            for trend in (-2.0, 0.0, TREND_RISING + 0.4, 8.0):
+                build = activation_probability(
+                    self._ctx(band, trend, self._structure("build"))
+                )
+                release = activation_probability(
+                    self._ctx(band, trend, self._structure("release"))
+                )
+                with self.subTest(band=band, trend=trend):
+                    self.assertGreater(build, release)
+
+    def test_the_release_damp_never_drives_the_chance_to_zero_or_below(self):
+        for band in self.BANDS:
+            for trend in (-5.0, 0.0, 20.0):
+                p = activation_probability(
+                    self._ctx(band, trend, self._structure("release"))
+                )
+                with self.subTest(band=band, trend=trend):
+                    self.assertGreater(p, 0.0)
+
+    def test_every_regime_stays_a_real_probability_in_the_unit_interval(self):
+        for regime in ("build", "release", "peak", "stable"):
+            for band in self.BANDS:
+                for trend in (-5.0, 0.0, TREND_RISING, TREND_RISING + 0.4, 30.0):
+                    p = activation_probability(
+                        self._ctx(band, trend, self._structure(regime))
+                    )
+                    with self.subTest(regime=regime, band=band, trend=trend):
+                        self.assertGreaterEqual(p, 0.0)
+                        self.assertLessEqual(p, 1.0)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ from ghost_in_the_deck.animation.dj_behavior import (
 from ghost_in_the_deck.animation import gesture_pose
 from ghost_in_the_deck.dj_planner import (
     DJActionPlanner,
+    MusicalContext,
+    activation_probability,
     context_at,
     decide_gesture_kind,
     planned_strength,
@@ -462,12 +464,31 @@ class TestEventRateFollowsEnergy(unittest.TestCase):
             f"high={len(high.events)} low={len(low.events)} - rate gap too small",
         )
 
-    def test_a_quiet_flat_track_still_produces_at_least_one_event(self):
-        """A low-energy, flat-trend track end to end: the activation chance for
-        the 'low' band is deliberately never zero, so the DJ never goes
-        completely silent."""
+    def test_a_quiet_flat_track_keeps_nonzero_activation_eligibility_every_band(self):
+        """The accurate contract: ``activation_probability`` is > 0 for every
+        energy band, so a quiet stretch is never made structurally ineligible
+        for an event - the 'low' base is deliberately non-zero and the broad
+        'release' damp is smaller than it. This is NOT a guarantee that every
+        quiet track produces an event: ``plan_schedule`` has no forced-event
+        fallback, and with an unlucky seed the per-bar rolls could all miss.
+
+        The concrete check below is that *this specific* low-energy, flat-trend
+        fixture does schedule at least one event - a fact about this fixture and
+        seed, not a universal law.
+        """
+        for band in ("low", "mid", "high"):
+            for trend in (-1.0, 0.0, 5.0):
+                ctx = MusicalContext(
+                    time=0.0, energy=0.5, trend=trend,
+                    energy_band=band, at_bar_boundary=True,
+                )
+                with self.subTest(band=band, trend=trend):
+                    self.assertGreater(activation_probability(ctx), 0.0)
+
         engine = self._engine(7.0e-4)
-        self.assertTrue(engine.events, "a quiet flat track scheduled nothing at all")
+        self.assertTrue(
+            engine.events, "this quiet flat fixture scheduled nothing at all"
+        )
         for t in (30.0, 150.0, 270.0):
             context = context_at(engine.energy, t)
             with self.subTest(t=t):
