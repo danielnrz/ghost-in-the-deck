@@ -14,19 +14,31 @@ moment. ``decide_action`` (Phase 2A) answers it for audio; ``decide_gesture_kind
 answers it for the visible gesture, from the *same* ``MusicalContext``, so the
 two are two readings of one decision rather than two independent rolls.
 
-What this phase deliberately does not do:
+Phase 2B moved *what* a chosen bar hosts here: ``DJBehaviorEngine._build_schedule``
+reads ``decide_gesture_kind`` / ``gesture_side_for`` / ``planned_strength`` at
+each fired bar's start rather than rolling kind, side and strength itself.
+Phase 2C moves the bar *choice* too: ``plan_schedule`` owns the whole bar-walk -
+the ``start >= 1.0`` eligibility floor, the per-bar activation roll (now against
+``activation_probability``, which reads the energy band and a rising-trend boost
+off the same ``MusicalContext``), the ``MIN_GAP_BARS`` + jitter spacing, and the
+``BASE_DURATION`` + jitter duration with its track-length clamp. Candidate
+positions stay the existing bar grid - no phrase/section/build/drop detection is
+added.
+
+What this module deliberately does not do:
 
 - It adds no new DSP effect. ``AUDIO_ACTIONS`` is exactly the two effects that
   already exist in ``audio/effects.py`` plus doing nothing.
-- It does not yet rewire ``DJBehaviorEngine._build_schedule`` to consume
-  ``decide_gesture_kind`` - that engine change is the next subtask. This file
-  only makes the decision available and deterministic.
-- It does not yet choose its own timing. A ``GestureEvent`` handed to
-  ``DJActionPlanner.plan`` is a source of *timing only* - ``.start`` and
-  ``.duration`` are read from it and nothing else. The action type, its
-  strength, and its side (when needed) are derived solely from musical context
-  plus this planner's own deterministic seed, never from the event's ``kind``,
-  ``side``, or ``strength``. That coupling is exactly what this phase removes.
+- It does not detect musical structure. ``plan_schedule`` walks the same fixed
+  bar grid ``_build_schedule`` always has; ``activation_probability`` reads only
+  the smoothed energy band and ``trend``, never phrase or section position.
+- ``DJActionPlanner.plan`` still consumes a caller's ``GestureEvent`` *timing*
+  (``.start`` / ``.duration``) unchanged - it maps an already-built visual
+  schedule onto audio actions. ``plan_schedule`` is the path that builds that
+  schedule from musical context in the first place. Either way the action type,
+  its strength, and its side are derived solely from musical context plus this
+  planner's own deterministic seed, never from a candidate event's ``kind``,
+  ``side`` or ``strength``.
 
 No Panda3D import. This module connects the audio and animation subsystems and
 belongs to neither package, so it sits at the top level alongside ``app.py``.
@@ -38,6 +50,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Sequence
 
+from .animation.cues import BEATS_PER_BAR, BeatTimeline
 from .animation.dj_behavior import (
     HIGH_ENERGY,
     LOW_ENERGY,
@@ -49,10 +62,11 @@ from .animation.energy import EnergyTrack
 
 # This phase's own cache-invalidation version, analogous to
 # ``effects.EFFECT_VERSION`` / ``features.SCHEMA_VERSION``. Bump it whenever a
-# change to ``decide_action`` or ``context_at`` would render a different
-# decision for the same ``GestureEvent`` schedule, even though ``effects.py``
-# itself did not change - ``app.processed_audio_path`` folds it into the fx
-# cache key so a render made under an older decision rule is never served after.
+# change to ``decide_action`` / ``activation_probability`` / ``context_at`` (or
+# another decision function feeding a render) would produce a different decision
+# for the same track, even though ``effects.py`` itself did not change -
+# ``app.processed_audio_path`` folds it into the fx cache key so a render made
+# under an older decision rule is never served after.
 PLANNER_VERSION = 1
 
 # Floor for a planned action's ``strength``: a full-energy moment plans at
@@ -85,6 +99,36 @@ SIDED_GESTURE_KINDS = ("hand_to_deck", "small_hype")
 # phase exists to remove.
 _SIDE_SALT = "dj-planner-side"
 
+# --- timing parameters, relocated from ``dj_behavior`` in Phase 2C ----------
+# The bar choice and its supporting timing are now this planner's own decision
+# (``plan_schedule``), computed from ``MusicalContext``, so the constants that
+# shape it live here rather than in ``DJBehaviorEngine``.
+
+# A new gesture may not start less than this many bars after the previous one
+# started. Combined with the activation roll, real spacing works out noticeably
+# irregular - never "every four bars", which would read as a metronome in a
+# costume.
+MIN_GAP_BARS = 3
+
+# Base duration per gesture kind, in seconds, before the small per-event jitter
+# ``plan_schedule`` applies.
+BASE_DURATION = {
+    "deck_glance": 1.0,
+    "lean_in": 1.6,
+    "hand_to_deck": 1.2,
+    "small_hype": 0.7,
+}
+
+# Per-energy-band base chance that an eligible bar hosts an event. "mid" is
+# 0.42 - exactly the flat ``dj_behavior.ACTIVATION_PROBABILITY`` this replaces,
+# so a mid-energy stretch keeps today's event density; low is quieter, high is
+# busier.
+ACTIVATION_BASE = {"low": 0.28, "mid": 0.42, "high": 0.58}
+
+# Added to the band's base chance when ``context.trend`` clears ``TREND_RISING``
+# - a build deserves more DJ activity - with the sum then capped at 1.0.
+ACTIVATION_TREND_BOOST = 0.15
+
 
 def _unit(seed: str, value: float, salt: str) -> float:
     """A stable pseudo-random 0..1 from a seed, a number and a salt string.
@@ -100,12 +144,29 @@ def _unit(seed: str, value: float, salt: str) -> float:
     return int.from_bytes(digest, "big") / float(0xFFFFFFFF)
 
 
+def _bar_unit(seed: str, bar: int, channel: int) -> float:
+    """A stable pseudo-random 0..1 from a seed, bar number and channel.
+
+    The bar-indexed sibling of ``_unit`` (which keys off a float), relocated
+    here from ``dj_behavior`` in Phase 2C along with the bar-walk that uses it.
+    blake2b for proper avalanche behaviour: an earlier crc32 version, being a
+    linear checksum, correlated the activation-stride and kind channels for
+    some seeds and drew the same gesture on every fired bar. Deterministic
+    across processes, unlike ``hash()``.
+    """
+    digest = hashlib.blake2b(
+        f"{seed}:{bar}:{channel}".encode(), digest_size=4
+    ).digest()
+    return int.from_bytes(digest, "big") / float(0xFFFFFFFF)
+
+
 def _band_for(energy: float) -> str:
     """``"low"`` / ``"mid"`` / ``"high"`` using ``dj_behavior``'s own thresholds.
 
     ``LOW_ENERGY`` / ``HIGH_ENERGY`` are imported, not re-derived, so the
     planner's notion of "high energy" is provably the same one
-    ``DJBehaviorEngine._kind_weights`` already uses.
+    ``decide_action`` / ``decide_gesture_kind`` / ``activation_probability``
+    all reason about - one band split, not several that could drift apart.
     """
     if energy < LOW_ENERGY:
         return "low"
@@ -201,6 +262,27 @@ def decide_gesture_kind(context: MusicalContext) -> str:
     return "deck_glance"
 
 
+def activation_probability(context: MusicalContext) -> float:
+    """Per-eligible-bar chance that the bar hosts a gesture event.
+
+    A pure function of ``context``: ``ACTIVATION_BASE`` for the energy band,
+    plus ``ACTIVATION_TREND_BOOST`` when ``context.trend`` clears the imported
+    ``TREND_RISING`` threshold, with the sum capped at 1.0. Strictly increasing
+    across low -> mid -> high at a fixed trend, always within ``[0, 1]``, and
+    never zero for any band.
+
+    This replaces ``dj_behavior``'s single flat ``ACTIVATION_PROBABILITY``: the
+    "mid" base is that same 0.42, so a mid-energy stretch keeps today's event
+    density exactly, while quiet and driving stretches now differ - and a rising
+    trend nudges any band busier, the same ``trend > TREND_RISING`` reading
+    ``decide_gesture_kind`` already uses to favour ``lean_in``.
+    """
+    probability = ACTIVATION_BASE[context.energy_band]
+    if context.trend > TREND_RISING:
+        probability += ACTIVATION_TREND_BOOST
+    return min(probability, 1.0)
+
+
 def planned_strength(context: MusicalContext) -> float:
     """The strength every planned action shares - audio or gesture-only alike.
 
@@ -265,6 +347,73 @@ class DJActionPlanner:
         if kind not in SIDED_GESTURE_KINDS:
             return None
         return self._side_for(start)
+
+    def plan_schedule(
+        self,
+        timeline: BeatTimeline,
+        energy: EnergyTrack,
+        duration: float,
+    ) -> list[GestureEvent]:
+        """Build the whole gesture schedule from musical context alone.
+
+        The bar-walk relocated from ``DJBehaviorEngine._build_schedule`` in
+        Phase 2C, so the bar *choice* - not just what a chosen bar hosts - is
+        the planner's own decision, computed from the same ``MusicalContext``
+        the kind / side / strength decisions already use:
+
+        - candidate positions are the existing bar grid (``timeline.beat_time``
+          at whole-bar beat counts); no phrase/section detection is added;
+        - a bar is eligible once its start reaches 1.0 s and once
+          ``MIN_GAP_BARS`` (plus 0..2 bars of seed jitter) have passed since
+          the last event started;
+        - an eligible bar fires when its activation roll falls below
+          ``activation_probability`` for the context at its start;
+        - a fired bar's duration is ``BASE_DURATION[kind]`` times a 0.85..1.15
+          jitter, and is dropped if it would run past ``duration``.
+
+        Deterministic in ``(self.seed, timeline, energy, duration)``: the same
+        inputs give a byte-identical event list. Reuses ``decide_gesture_kind``
+        / ``gesture_side_for`` / ``planned_strength`` exactly as they stand.
+        """
+        nominal = timeline.nominal_interval
+        bar_seconds = max(nominal * BEATS_PER_BAR, 1e-3)
+        # A generous bound on how many bars a track this long could contain, so
+        # the loop terminates even for pathological feature data.
+        max_bars = int(duration / bar_seconds) + 4
+
+        events: list[GestureEvent] = []
+        bar = 0
+        next_eligible_bar = 0
+        while bar < max_bars:
+            start = timeline.beat_time(bar * BEATS_PER_BAR)
+            if start > duration:
+                break
+
+            if bar >= next_eligible_bar and start >= 1.0:
+                context = context_at(energy, start)
+                if _bar_unit(self.seed, bar, 0) < activation_probability(context):
+                    kind = decide_gesture_kind(context)
+
+                    jitter = 0.85 + 0.3 * _bar_unit(self.seed, bar, 2)
+                    event_duration = BASE_DURATION[kind] * jitter
+                    if start + event_duration > duration:
+                        bar += 1
+                        continue
+
+                    side = self.gesture_side_for(kind, start)
+                    strength = planned_strength(context)
+                    events.append(
+                        GestureEvent(start, event_duration, kind, side, strength)
+                    )
+
+                    gap_bars = MIN_GAP_BARS + int(
+                        round(2.0 * _bar_unit(self.seed, bar, 4))
+                    )
+                    next_eligible_bar = bar + gap_bars
+
+            bar += 1
+
+        return events
 
     def plan(
         self,
