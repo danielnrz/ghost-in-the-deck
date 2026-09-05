@@ -92,15 +92,19 @@ ENVELOPE_SHAPE = {
 _SEED_SALT = "dj-behavior"
 
 
-def trend_at(energy: EnergyTrack, time: float) -> float:
-    """Energy now minus energy ``TREND_LOOKBACK`` seconds ago, clamped at t=0.
+def trend_at(energy: EnergyTrack, time: float, lookback: float = TREND_LOOKBACK) -> float:
+    """Energy now minus energy ``lookback`` seconds ago, clamped at t=0.
 
     Module-level so ``dj_planner`` (whose ``decide_gesture_kind`` picks
     ``lean_in`` on a rising trend) and ``DJBehaviorEngine._trend`` reason about
     "rising" from one shared definition rather than two copies that could drift
     apart.
+
+    ``lookback`` defaults to ``TREND_LOOKBACK`` so every existing call site is
+    unchanged; ``structure`` passes a longer window to read a broader-timescale
+    trend from the same shared definition rather than a second copy.
     """
-    earlier = max(0.0, time - TREND_LOOKBACK)
+    earlier = max(0.0, time - lookback)
     return energy.at(time) - energy.at(earlier)
 
 
