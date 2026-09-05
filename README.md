@@ -733,8 +733,8 @@ What Phase 4A explicitly does **not** do:
 - **No audio at all.** No crossfade, EQ, filter, gain or time-stretch. A
   `TransitionPlan` existing causes zero audio processing; `audio/effects.py` is
   untouched.
-- **No pitch analysis.** Nothing here reads or guesses tonal content, and no
-  field judges how the two tracks sit together.
+- **No tonal analysis.** Nothing here reads or guesses the notes in either
+  track, and no field judges how the two tracks sit together.
 - **No real section detection.** `regime` stays within the same four
   descriptive words as Phase 3A (`build` / `release` / `peak` / `stable`); no
   named song part is ever inferred. `section_change_likelihood` is still just
