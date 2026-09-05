@@ -18,6 +18,7 @@ is correct for the moment it is drawn.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -48,6 +49,49 @@ SHOW_ACTION_LOOP_SECONDS = 3.0
 SHOW_ACTION_PREVIEW_SECONDS = 12.0
 ANALYSIS_DIR = ROOT / "out" / "analysis"
 REPORT_DIR = ROOT / "out"
+# Rendered once per (wav, behaviour schedule) pair, same offline-cache pattern
+# as audio/decode.py's own CACHE_DIR - a separate directory because the key
+# these files are addressed by is different (it folds in the gesture schedule,
+# not just the source file's own identity).
+FX_CACHE_DIR = ROOT / "cache" / "audio_fx"
+
+
+def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
+    """Render ``wav`` through the hand_to_deck filter sweep once, then cache it.
+
+    The cache key folds in the source wav's own identity (path, size, mtime)
+    and every hand_to_deck event's own timing/side/strength, so a stale render
+    is never served after either the audio or the seed/schedule that derives
+    the sweep changes - the same principle ``decode._cache_path`` uses for
+    the plain decode, extended to include what this stage adds on top.
+    """
+    stat = wav.stat()
+    events_key = "|".join(
+        f"{e.start:.6f}:{e.duration:.6f}:{e.side}:{e.strength:.6f}"
+        for e in behavior.events
+        if e.kind == "hand_to_deck"
+    )
+    key = (
+        f"{wav.resolve()}:{stat.st_size}:{int(stat.st_mtime)}:"
+        f"{behavior.seed}:{events_key}"
+    )
+    digest = hashlib.sha1(key.encode()).hexdigest()[:12]
+    target = FX_CACHE_DIR / f"{wav.stem}-{digest}.wav"
+    if target.is_file():
+        return target
+
+    import soundfile as sf
+
+    from .audio.effects import apply_hand_to_deck_effects
+
+    data, sample_rate = sf.read(str(wav), dtype="float64", always_2d=True)
+    processed = apply_hand_to_deck_effects(data, sample_rate, behavior.events)
+
+    FX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(".partial.wav")
+    sf.write(str(partial), processed, sample_rate, subtype="PCM_16")
+    partial.replace(target)
+    return target
 
 
 def positive_int(value: str) -> int:
@@ -112,7 +156,10 @@ class GhostApp:
 
         sound = None
         if not args.no_audio:
-            sound = self.base.loader.loadSfx(str(to_wav(self.track)))
+            wav_path = to_wav(self.track)
+            if self.behavior is not None and not args.no_fx:
+                wav_path = processed_audio_path(wav_path, self.behavior)
+            sound = self.base.loader.loadSfx(str(wav_path))
         self.clock = PlaybackClock(sound)
 
         self._next_stall_at = args.stall_every if args.stall_every else None
@@ -295,6 +342,14 @@ def main() -> None:
         "--no-actions",
         action="store_true",
         help="disable the DJ action layer; groove only, as in Phase 1A",
+    )
+    parser.add_argument(
+        "--no-fx",
+        action="store_true",
+        help=(
+            "disable the hand_to_deck filter sweep; play the decoded track "
+            "unprocessed, for A/B comparison (effects are on by default)"
+        ),
     )
     parser.add_argument(
         "--show-action",
