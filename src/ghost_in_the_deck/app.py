@@ -33,6 +33,7 @@ from .animation.workstation import DEFAULT_TARGETS
 from .animation.rig import AvatarRig
 from .audio.analysis import analyse
 from .audio.decode import to_wav
+from .audio.effects import EFFECT_VERSION
 from .audio.features import SCHEMA_VERSION, MusicFeatures
 from .audio.library import DEFAULT_MUSIC_DIR, choose_track
 from .clock import PlaybackClock
@@ -59,11 +60,16 @@ FX_CACHE_DIR = ROOT / "cache" / "audio_fx"
 def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     """Render ``wav`` through the hand_to_deck filter sweep once, then cache it.
 
-    The cache key folds in the source wav's own identity (path, size, mtime)
-    and every hand_to_deck event's own timing/side/strength, so a stale render
-    is never served after either the audio or the seed/schedule that derives
-    the sweep changes - the same principle ``decode._cache_path`` uses for
-    the plain decode, extended to include what this stage adds on top.
+    The cache key folds in the source wav's own identity (path, size, mtime),
+    the effect implementation's own version, and every hand_to_deck event's
+    own timing/side/strength, so a stale render is never served after the
+    audio, the effect implementation, or the seed/schedule that derives the
+    sweep changes - the same principle ``decode._cache_path`` uses for the
+    plain decode, extended to include what this stage adds on top. Event
+    fields are serialised via ``float.hex()`` (an exact, lossless
+    representation) rather than a fixed number of decimal digits, so two
+    schedules that differ below the sixth decimal place cannot collide on the
+    same key and share a stale render.
 
     A schedule with no hand_to_deck events at all has nothing to render:
     returning ``wav`` itself (rather than writing a "processed" copy that
@@ -73,7 +79,7 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     different sample format than the one on disk.
     """
     events_key = "|".join(
-        f"{e.start:.6f}:{e.duration:.6f}:{e.side}:{e.strength:.6f}"
+        f"{e.start.hex()}:{e.duration.hex()}:{e.side}:{e.strength.hex()}"
         for e in behavior.events
         if e.kind == "hand_to_deck"
     )
@@ -83,7 +89,7 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     stat = wav.stat()
     key = (
         f"{wav.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:"
-        f"{behavior.seed}:{events_key}"
+        f"effect_v{EFFECT_VERSION}:{behavior.seed}:{events_key}"
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
     target = FX_CACHE_DIR / f"{wav.stem}-{digest}.wav"

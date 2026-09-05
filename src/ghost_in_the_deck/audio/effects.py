@@ -74,6 +74,14 @@ from ..animation.dj_behavior import GestureEvent, _envelope_weight
 LOWPASS_DEEP_CUTOFF_HZ = 450.0
 HIGHPASS_DEEP_CUTOFF_HZ = 900.0
 
+# Bumped whenever a change here would render different output for the same
+# input samples and the same GestureEvent schedule (a cutoff, an envelope
+# shape, a windowing/clipping rule, ...). ``app.processed_audio_path`` folds
+# this into its cache key precisely so a render cached under an older version
+# of this module is never served after such a change - the same role
+# ``features.SCHEMA_VERSION`` plays for the analysis cache.
+EFFECT_VERSION = 1
+
 _KIND = "hand_to_deck"
 
 

@@ -10,6 +10,10 @@ F3  a zero-event schedule reached playback re-encoded as PCM_16 instead of
     being served as the untouched source file
 F4  the effect cache key truncated mtime to the second, so a same-size,
     same-second file replacement could serve a stale render
+
+Phase 1C correction round 2 (hand_to_deck audio effect):
+F5  the effect cache key carried no effect/schema version, so a render
+    cached before an ``audio.effects`` change could still be served after it
 """
 
 from __future__ import annotations
@@ -296,6 +300,56 @@ class TestHandToDeckEffectWiring(unittest.TestCase):
                 "same-second replacement reused the previous cache entry",
             )
             self.assertNotEqual(second_target.read_bytes(), first_bytes)
+
+    def test_effect_version_bump_invalidates_the_cache(self):
+        """F5: a render cached under one EFFECT_VERSION must not be served
+        once the effect implementation's version changes, even though the
+        wav and the schedule are unchanged."""
+        import tempfile
+        from unittest import mock
+
+        from ghost_in_the_deck import app as app_module
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        events = [GestureEvent(0.1, 0.2, "hand_to_deck", "l", 0.9)]
+        behavior = _FakeBehavior(events=events)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, 4410, 0.3)
+
+            with mock.patch.object(app_module, "EFFECT_VERSION", 1):
+                first_target = processed_audio_path(wav, behavior)
+
+            with mock.patch.object(app_module, "EFFECT_VERSION", 2):
+                second_target = processed_audio_path(wav, behavior)
+
+            self.assertNotEqual(
+                first_target, second_target,
+                "an EFFECT_VERSION bump reused the previous cache entry",
+            )
+
+    def test_events_differing_below_the_old_rounding_do_not_collide(self):
+        """F6: two schedules that used to serialise identically at 6 decimal
+        places must still resolve to distinct cache keys."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        events_a = [GestureEvent(0.10000001, 0.2, "hand_to_deck", "l", 0.9)]
+        events_b = [GestureEvent(0.10000009, 0.2, "hand_to_deck", "l", 0.9)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, 4410, 0.3)
+
+            target_a = processed_audio_path(wav, _FakeBehavior(events=events_a))
+            target_b = processed_audio_path(wav, _FakeBehavior(events=events_b))
+
+            self.assertNotEqual(
+                target_a, target_b,
+                "schedules differing below the sixth decimal shared a cache entry",
+            )
 
 
 if __name__ == "__main__":
