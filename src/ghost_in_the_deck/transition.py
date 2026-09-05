@@ -189,3 +189,85 @@ class TransitionPlan:
             score=score,
             reason=reason,
         )
+
+
+# Weights behind a pair's combined score: the outgoing cue's own stability
+# score, the incoming cue's own stability score, and the tempo-closeness term
+# from ``bpm_ratio``. Equal weights - a plain mean - is the documented default;
+# nothing here is tuned, fitted or learned. Change the tuple to reweight.
+PAIR_SCORE_WEIGHTS = (1.0, 1.0, 1.0)
+
+
+def tempo_closeness(bpm_ratio: float) -> float:
+    """How close two decks' tempos are, as a 0..1 score - 1.0 at an exact match.
+
+    ``1.0 - min(abs(bpm_ratio - 1.0), 1.0)``: a half- or double-speed pairing
+    (ratio 0.5 or 2.0) still scores 0.5, and anything a whole multiple or more
+    apart floors at 0.0. Direction-sensitive because ``bpm_ratio`` is: the score
+    for ``r`` and for ``1 / r`` are generally different numbers.
+    """
+    return 1.0 - min(abs(bpm_ratio - 1.0), 1.0)
+
+
+def _combined_score(
+    outgoing_score: float, incoming_score: float, tempo_score: float
+) -> float:
+    """Fold the three measured terms into one scalar via ``PAIR_SCORE_WEIGHTS``.
+
+    A weighted mean, evaluated in a fixed term order so the same three inputs
+    always produce a byte-identical float.
+    """
+    w_out, w_in, w_tempo = PAIR_SCORE_WEIGHTS
+    weighted = w_out * outgoing_score + w_in * incoming_score + w_tempo * tempo_score
+    return weighted / (w_out + w_in + w_tempo)
+
+
+def plan_transition(
+    context: TwoDeckContext,
+    *,
+    margin_seconds: float = EDGE_MARGIN_SECONDS,
+    limit_per_deck: int = MAX_CANDIDATES_PER_DECK,
+) -> "TransitionPlan | None":
+    """Pick the single best outgoing/incoming cue pair for ``context``.
+
+    Generates ``candidate_cue_points`` for ``context.deck_a`` (outgoing) and
+    ``context.deck_b`` (incoming), scores every ``(outgoing, incoming)`` pair as
+    ``_combined_score`` of the outgoing cue's score, the incoming cue's score and
+    ``tempo_closeness(context.bpm_ratio)``, and returns the top pair as a
+    ``TransitionPlan``. Ties break deterministically: earliest ``outgoing.time``,
+    then earliest ``incoming.time``.
+
+    Returns ``None`` when either deck yields zero candidates - it never
+    fabricates a cue point to force a plan. Fully deterministic: the same two
+    ``TrackDeck`` objects give a byte-identical result every call.
+    """
+    outgoing_candidates = candidate_cue_points(
+        context.deck_a, margin_seconds=margin_seconds, limit=limit_per_deck
+    )
+    incoming_candidates = candidate_cue_points(
+        context.deck_b, margin_seconds=margin_seconds, limit=limit_per_deck
+    )
+    if not outgoing_candidates or not incoming_candidates:
+        return None
+
+    tempo_score = tempo_closeness(context.bpm_ratio)
+
+    best: tuple[CuePoint, CuePoint, float] | None = None
+    best_key: tuple[float, float, float] | None = None
+    for outgoing in outgoing_candidates:
+        for incoming in incoming_candidates:
+            score = _combined_score(outgoing.score, incoming.score, tempo_score)
+            key = (-score, outgoing.time, incoming.time)
+            if best_key is None or key < best_key:
+                best_key = key
+                best = (outgoing, incoming, score)
+
+    assert best is not None  # both candidate lists are non-empty
+    outgoing, incoming, score = best
+    reason = (
+        f"combined {score:.4f} = weighted mean("
+        f"outgoing {outgoing.score:.4f}, incoming {incoming.score:.4f}, "
+        f"tempo {tempo_score:.4f} from bpm_ratio {context.bpm_ratio:.4f}) "
+        f"weights {PAIR_SCORE_WEIGHTS}"
+    )
+    return TransitionPlan.from_selection(context, outgoing, incoming, score, reason)
