@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 1D**.
+This repository is currently at **Phase 2A**.
 
 ## Phase 0 scope
 
@@ -487,6 +487,52 @@ not four. `deck_glance` and `lean_in` still change nothing about the sound.
 There is still no EQ, no crossfader, no fader movement, and no live parameter
 control - both effects are computed once offline from the fixed schedule.
 
+## A decision layer, not a bigger effect (Phase 2A)
+
+Phase 1C and 1D each wired a DSP effect directly to one gesture's own `kind`:
+the filter sweep existed *because* a `hand_to_deck` was scheduled, the riser
+*because* a `small_hype` was. That is `gesture -> audio`. Phase 2A inserts the
+missing step and turns that arrow around for the audio decision:
+
+    analysis -> musical context -> DJ action planner -> real audio action
+
+`dj_planner.py` (top-level, alongside `app.py` - it joins the audio and
+animation subsystems and belongs to neither) is a small, deterministic,
+Panda3D-free module. `context_at` reads the track's smoothed energy and a
+short trend at one absolute time - the *same* `EnergyTrack` and the *same*
+promoted `trend_at` the gesture scheduler uses, and the *same* imported
+`LOW_ENERGY` / `HIGH_ENERGY` band edges `DJBehaviorEngine._kind_weights`
+already reasons about, not restated copies. `decide_action` then picks from
+exactly three outcomes: high energy -> the gain riser (an energy peak,
+`small_hype`'s existing role); mid energy -> the filter sweep
+(`hand_to_deck`'s "working a control" role); low energy -> nothing. `trend` is
+computed and carried for observability and later phases but is not yet
+load-bearing in the decision - none of the two existing effects represents a
+build.
+
+**No new DSP effect was added.** `audio/effects.py` is byte-for-byte what
+Phase 1D left it. The two functions there are reused exactly; `AUDIO_ACTIONS`
+is deliberately just those two plus `"none"`.
+
+`app.processed_audio_path` now calls `DJActionPlanner(behavior.seed).plan(...)`
+once and builds its render (and its `cache/audio_fx/` key, which also folds in
+`PLANNER_VERSION`) from the *planned actions*, not from the gesture schedule's
+`kind`s. A planner handed a `GestureEvent` reads only its `.start` and
+`.duration` - its `kind`, `side` and `strength` are never consulted. When a
+sweep needs a left/right side, the planner derives one from its own seed and
+the moment alone (salted apart from `dj_behavior`'s own per-bar side draw), so
+the choice is identical whether or not the candidate gesture happened to carry
+a side.
+
+What this phase does **not** do: it does not touch `DJBehaviorEngine`'s own
+gesture-kind selection. The *visible* gesture at a scheduled moment - which
+kind, when - is still exactly the pre-existing weighted-random roll, and is
+**not yet** driven by this planner. Unifying the two so the planner picks the
+moment and action first and the gesture is chosen to match is the deferred
+next step (Phase 2B). There is still no section, build or drop detection -
+only an energy band and a short trend - and still no two-track mixing, EQ,
+crossfader or live parameter control.
+
 ## Tests
 
 ```bash
@@ -505,8 +551,14 @@ per side, no leakage outside its own window, exact boundary silence, signal
 integrity over a population), the `small_hype` gain riser (determinism,
 located amplitude increase, no leakage, exact boundary identity, a headroom
 sweep including a near-full-scale case, and a combined schedule proving
-neither effect corrupts the other's window), and a pixel comparison of
-rendered frames proving the movement is actually visible.
+neither effect corrupts the other's window), the DJ action planner
+(`context_at` agreeing with `DJBehaviorEngine`'s own energy/trend maths, an
+audio decision being identical for two events that share only start/duration,
+band edges matching the imported constants, and a deterministic sweep side),
+the planner wiring in `app.processed_audio_path` (an all-`deck_glance`
+schedule still rendering, an all-`hand_to_deck` schedule in the low-energy
+band rendering nothing, and `PLANNER_VERSION` invalidating the cache), and a
+pixel comparison of rendered frames proving the movement is actually visible.
 
 `test_timing.py` is the render-stall suite for the groove. It drives the real
 timeline and animator through 60/30/15/5 fps schedules and through 250 ms,
@@ -553,14 +605,16 @@ Two format notes, both learned the hard way:
 
 ## Known limitations
 
-- The gesture vocabulary is small, and only two of its four kinds do anything
-  to the audio: `hand_to_deck`'s filter sweep (low-pass on the left hand,
-  high-pass on the right) and `small_hype`'s gain riser, each offline and
-  deterministic, each tied to that one gesture's own envelope. `deck_glance`
-  and `lean_in` still change nothing about the sound. There is no knob
-  contact beyond those two effects, no fader movement, no EQ bands, no
-  crossfading, and no live parameter control - both are precomputed once per
-  track from the fixed gesture schedule, not solved or adjusted at runtime.
+- The gesture vocabulary is small, and there are still only two DSP effects:
+  a filter sweep (low-pass / high-pass) and a gain riser, each offline and
+  deterministic, each running over an attack-hold-release envelope. As of
+  Phase 2A which of them plays at a scheduled moment - or neither - is chosen
+  by `dj_planner.py` from the music's energy band there, not from the gesture
+  kind the avatar performs, so the sweep and riser are no longer welded to
+  `hand_to_deck` / `small_hype` respectively. There is no knob contact beyond
+  those two effects, no fader movement, no EQ bands, no crossfading, and no
+  live parameter control - everything is precomputed once per track from the
+  fixed schedule, not solved or adjusted at runtime.
 - `hand_to_deck`'s IK targets a fixed point - the front control row - and its
   peak offsets are calibrated once, offline, against the arm at rest. It does
   not re-solve live against wherever the shoulder actually is once groove sway
@@ -581,6 +635,15 @@ Two format notes, both learned the hard way:
   solver or runtime finger IK, by design.
 - Gesture selection reasons about relative energy and a short trend, not real
   musical structure. It has no idea what a build-up, a drop or a breakdown is.
+- Gesture selection and audio-action selection are now two independent
+  deterministic decisions (Phase 2A), not yet unified into one planner. The
+  audio decision is made from the music's energy band at a scheduled moment,
+  the visible gesture from the older weighted-random roll. A consequence: a
+  moment labelled `lean_in` or `deck_glance` can now also produce a filter
+  sweep or a gain riser, and a moment labelled `hand_to_deck` or `small_hype`
+  can now produce silence, because which effect plays no longer depends on the
+  gesture's kind. That is the intended behaviour of this phase, not a
+  regression; Phase 2B is where the two decisions become one.
 - Bars are assumed to be four beats. A track in another metre still grooves,
   and gestures still land on a bar boundary, but the wrong one.
 - Before the first detected beat and after the last, the beat grid is
