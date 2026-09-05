@@ -144,15 +144,51 @@ def _render_window(x: np.ndarray, weight: np.ndarray, strength: float, side: str
 
     ``weight`` is exactly 0.0 at index 0 and index -1 (``_envelope_weight``'s
     own contract). For low-pass that already makes the recursion reduce to the
-    dry sample there, with no help needed. For high-pass it does not - see the
-    module docstring - so both ends are pinned to the dry input explicitly
-    rather than relied upon, which is what actually gives "no boundary click"
-    for both filter types instead of one.
+    dry sample there, with no help needed: ``y[n] = y[n-1] + 1*(x[n]-y[n-1])``
+    is ``x[n]`` regardless of prior state.
+
+    High-pass is not so lucky. Its recursion also produces ``y[0] == x[0]``
+    exactly (both running-state variables start equal to ``x[0]``), but by the
+    end of the window ``y[n-1]`` has generally drifted away from ``x[n-1]`` -
+    the whole preceding sweep deliberately made them differ - so the *raw*
+    recursion output at the last sample is ``x[-1] + (y[n-2] - x[n-2])``, not
+    ``x[-1]``. Forcing that last sample to ``x[-1]`` without correcting for
+    the drift (as an earlier version of this function did) leaves the
+    second-to-last sample exactly where the drift put it and the last sample
+    pinned to dry, i.e. a single-sample jump equal to the whole accumulated
+    drift - an audible click. Instead, the drift is measured once
+    (``offset``) and subtracted back out as a ramp from 0 (at the start,
+    where it is already zero) to the full offset (at the end, cancelling it
+    exactly), so the correction is spread smoothly across the window and the
+    tail rejoins the dry signal at the same slope the dry signal already had,
+    rather than in one discontinuous step.
+
+    The explicit endpoint assignments after that are then true no-ops for
+    low-pass and exact-by-construction for high-pass; they are kept anyway as
+    a floating-point safety net against the ramp not landing on exactly
+    ``x[-1]``.
     """
     alpha, is_highpass = _alpha_series(weight, strength, side, sample_rate)
     y = _run_highpass(x, alpha) if is_highpass else _run_lowpass(x, alpha)
+    if is_highpass:
+        offset = y[-1] - x[-1]
+        ramp = np.linspace(0.0, 1.0, len(y), dtype=x.dtype)
+        if y.ndim > 1:
+            ramp = ramp[:, None]
+        y = y - ramp * offset
     y[0] = x[0]
     y[-1] = x[-1]
+
+    # A one-pole high-pass built from a difference term can overshoot on a
+    # transient (a step input spikes before it decays); left unchecked that
+    # can push samples outside the input's own dynamic range, which the
+    # eventual PCM_16 write would then silently saturate. Bound each window
+    # to whatever range the dry audio in that window (or the valid PCM
+    # ceiling, if that is looser) already used, so the effect can reshape the
+    # spectrum but never hands downstream code a sample it didn't already
+    # have to represent.
+    limit = max(float(np.max(np.abs(x))), 1.0)
+    np.clip(y, -limit, limit, out=y)
     return y
 
 
@@ -168,9 +204,10 @@ def apply_hand_to_deck_effects(
     other sample - anywhere outside a ``hand_to_deck`` event's own
     ``[start, start + duration]`` window - is copied through bit-identical.
     An empty or all-non-hand_to_deck event list is a no-op: the returned array
-    equals the input exactly.
+    equals the input exactly, dtype included, so it round-trips through a
+    byte-for-byte comparison rather than merely an equal-value one.
     """
-    out = np.array(samples, dtype=np.float64, copy=True)
+    out = np.array(samples, dtype=samples.dtype, copy=True)
     was_1d = out.ndim == 1
     if was_1d:
         out = out[:, None]

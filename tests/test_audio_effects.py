@@ -137,6 +137,15 @@ class TestNoLeakage(unittest.TestCase):
         processed = apply_hand_to_deck_effects(signal, SAMPLE_RATE, [])
         self.assertTrue(np.array_equal(processed, signal))
 
+    def test_no_scheduled_events_preserves_dtype_and_is_byte_identical(self):
+        """Equal values are not enough: a float32 track with nothing scheduled
+        must come back as float32, byte-for-byte, not silently upcast to
+        float64 and doubled in storage."""
+        signal = make_broadband_signal(4.0, sr=SAMPLE_RATE).astype(np.float32)
+        processed = apply_hand_to_deck_effects(signal, SAMPLE_RATE, [])
+        self.assertEqual(processed.dtype, signal.dtype)
+        self.assertEqual(processed.tobytes(), signal.tobytes())
+
 
 class TestNoBoundaryClick(unittest.TestCase):
     def test_contribution_is_exactly_zero_at_start_and_end_of_every_event(self):
@@ -155,6 +164,27 @@ class TestNoBoundaryClick(unittest.TestCase):
             with self.subTest(start=event.start, side=event.side):
                 self.assertTrue(np.array_equal(processed[start_idx], signal[start_idx]))
                 self.assertTrue(np.array_equal(processed[end_idx], signal[end_idx]))
+
+    def test_highpass_release_has_no_step_discontinuity_before_the_pin(self):
+        """The pinned last sample of a window must be *reached* smoothly, not
+        jumped to. A slowly-varying dry signal changes by almost nothing from
+        one sample to the next, so the processed signal's own step into the
+        pinned endpoint should match that, not the multi-percent jump an
+        unconditional ``y[-1] = x[-1]`` produces once the high-pass recursion
+        has drifted away from the dry signal."""
+        sr = SAMPLE_RATE
+        t = np.arange(int(2.5 * sr)) / sr
+        signal = (0.8 * np.sin(2 * np.pi * 20.0 * t))[:, None]
+        event = GestureEvent(1.0, 1.2, "hand_to_deck", "r", 1.0)
+        processed = apply_hand_to_deck_effects(signal, sr, [event])
+
+        end_idx = round(1.0 * sr) + round(1.2 * sr)
+        dry_step = signal[end_idx, 0] - signal[end_idx - 1, 0]
+        wet_step = processed[end_idx, 0] - processed[end_idx - 1, 0]
+        self.assertLess(
+            abs(wet_step - dry_step), 1e-4,
+            f"boundary step {wet_step:.6f} does not match the dry step {dry_step:.6f}",
+        )
 
 
 class TestSignalIntegrity(unittest.TestCase):
@@ -176,10 +206,36 @@ class TestSignalIntegrity(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(processed)), "non-finite sample present")
         peak_in = float(np.max(np.abs(signal)))
         peak_out = float(np.max(np.abs(processed)))
+        # The effect must never introduce a peak beyond what the dry audio
+        # already required to represent (or the valid PCM ceiling, if the dry
+        # audio happens to already exceed it, as this synthetic noise does) -
+        # not merely "close to" the input peak.
+        limit = max(peak_in, 1.0)
         self.assertLessEqual(
-            peak_out, peak_in * 1.05,
-            f"processed peak {peak_out:.4f} exceeds input peak {peak_in:.4f} by more than 5%",
+            peak_out, limit + 1e-9,
+            f"processed peak {peak_out:.6f} exceeds the {limit:.6f} the dry audio used",
         )
+
+    def test_highpass_never_exceeds_valid_pcm_range_on_a_normalised_signal(self):
+        """Reproduces the reviewer's finding: real scheduled events on audio
+        that is already normalised to +-1 must not push samples outside it,
+        since app.py writes the result as PCM_16 and silently saturates."""
+        rng = np.random.default_rng(4)
+        signal = rng.normal(0.0, 0.3, (int(2.5 * SAMPLE_RATE), 2))
+        signal = signal / np.max(np.abs(signal)) * 0.999
+        events = [
+            GestureEvent(0.5, 1.0, "hand_to_deck", "r", 1.0),
+            GestureEvent(1.8, 0.9, "hand_to_deck", "l", 0.8),
+        ]
+        processed = apply_hand_to_deck_effects(signal, SAMPLE_RATE, events)
+        self.assertLessEqual(float(np.max(np.abs(processed))), 1.0 + 1e-9)
+
+    def test_highpass_survives_a_full_scale_step_without_overshoot(self):
+        n = int(2.5 * SAMPLE_RATE)
+        signal = np.concatenate([-np.ones(n // 2), np.ones(n - n // 2)])[:, None]
+        event = GestureEvent(1.0, 1.2, "hand_to_deck", "r", 1.0)
+        processed = apply_hand_to_deck_effects(signal, SAMPLE_RATE, [event])
+        self.assertLessEqual(float(np.max(np.abs(processed))), 1.0 + 1e-9)
 
 
 if __name__ == "__main__":
