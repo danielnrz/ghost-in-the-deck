@@ -97,6 +97,9 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     if not events_key:
         return wav
 
+    # Known limitation: this keys on path/size/mtime_ns, not file contents, so
+    # a same-size overwrite that also manages to restore the old mtime_ns
+    # (e.g. a tool that preserves timestamps) can still serve a stale render.
     stat = wav.stat()
     key = (
         f"{wav.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:"
