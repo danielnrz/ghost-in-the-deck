@@ -102,6 +102,21 @@ def make_features(
     )
 
 
+def make_broadband_signal(
+    seconds: float, sr: int = 44100, channels: int = 2, seed: int = 3
+) -> np.ndarray:
+    """Deterministic white-ish noise spanning the audible band.
+
+    Audio effects tests need a signal with real energy at both low and high
+    frequencies to prove a filter moved it - a pure tone would only prove the
+    filter affects *a* frequency, not that it reshapes a real spectrum. Fixed
+    seed, so two calls with the same arguments are byte-identical.
+    """
+    rng = np.random.default_rng(seed)
+    samples = rng.normal(0.0, 0.2, (int(seconds * sr), channels))
+    return samples.astype(np.float64)
+
+
 def regular_beats(bpm: float = 120.0, count: int = 24, offset: float = 0.5) -> list[float]:
     interval = 60.0 / bpm
     return [offset + i * interval for i in range(count)]
