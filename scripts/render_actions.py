@@ -178,8 +178,24 @@ def main() -> None:
     # over-the-table arc is mostly forward/up motion (Y/Z), which the front
     # and three-quarter framings above mostly foreshorten away. Framed on the
     # table/hand area rather than the whole body, and only for hand_to_deck.
+    #
+    # Visual QA round 1 finding: at profile_distance = height * 0.9 with the
+    # lookAt centred on the settled target (0.15, -0.34), the wrist left the
+    # lens frustum entirely at the 25%/50% stages and sat at its very edge at
+    # 75% - confirmed numerically (not just by eye) by projecting the exposed
+    # ``hand_l``/``hand_r`` joint through this camera's own lens at each
+    # rendered stage. The camera was calibrated before the R1 corner-avoidance
+    # detour (``REACH_SWING_OUT_ROLL``/``HEADING``, gesture_pose.py) existed;
+    # that detour swings the wrist out to roughly double its final target's
+    # lateral offset before it crosses the table, which the old framing never
+    # accounted for. Pulling back (0.9 -> 1.3x height) and re-centring the
+    # look point on the swing's own midpoint rather than the endpoint keeps
+    # the wrist within the frustum across the whole event (worst case ~53% of
+    # the half-width, sampled every 1% of progress on both sides) while still
+    # keeping the tabletop and control target in frame. This is a capture-only
+    # change: it does not touch the reach pose, timing or clearance geometry.
     profile_angle = math.radians(80.0)
-    profile_distance = height * 0.9
+    profile_distance = height * 1.3
     for side in ("l", "r"):
         sign = 1.0 if side == "l" else -1.0
         base.camera.setPos(
@@ -187,7 +203,7 @@ def main() -> None:
             -math.cos(profile_angle) * profile_distance,
             height * 0.62,
         )
-        base.camera.lookAt(sign * 0.15, -0.34, height * 0.55)
+        base.camera.lookAt(sign * 0.5, -0.18, height * 0.62)
         for stage_label, progress in _trajectory_stages():
             weight = _envelope_weight("hand_to_deck", progress)
             action = DJActionState(REFERENCE_TIME, "hand_to_deck", progress, weight, side, 0.9)
