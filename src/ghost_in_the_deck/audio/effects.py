@@ -1,10 +1,19 @@
-"""A real, deterministic audio effect tied to the ``hand_to_deck`` gesture.
+"""Real, deterministic audio effects tied to gestures.
 
-Phase 1B built a hand that visibly lands on a control; nothing it did changed
-what was heard. This module closes that gap for exactly one gesture: every
-scheduled ``hand_to_deck`` event sweeps a simple one-pole filter across its own
-attack-hold-release window, so the moment the avatar's hand appears to touch a
-knob is the moment the track's own timbre audibly moves.
+Phase 1B built gestures that visibly land on a control or punch the air;
+nothing they did changed what was heard. Phase 1C closed that gap for
+``hand_to_deck``: every scheduled event sweeps a simple one-pole filter across
+its own attack-hold-release window, so the moment the avatar's hand appears to
+touch a knob is the moment the track's own timbre audibly moves. Phase 1D adds
+a second, distinct effect for ``small_hype``: a deterministic gain-envelope
+("riser") that raises the track's amplitude across that gesture's own window -
+an amplitude effect, not a frequency one, matching how ``small_hype`` already
+represents a different musical moment (an energy peak) from ``hand_to_deck``'s
+"working a control" moment.
+
+``small_hype`` events carry a ``side`` (for the avatar's raised arm), but a
+gain riser has no left/right meaning the way a filter sweep does: it applies
+the same boost regardless of ``side``.
 
 Nothing here imports Panda3D. It operates on plain PCM sample arrays and a
 sample rate - a numpy array in, a numpy array out - importable and testable
@@ -52,6 +61,36 @@ classic filter-knob move. ``side="r"`` sweeps a high-pass filter up and back
 down - cutting lows. This mirrors the workstation's own
 ``left_controls``/``right_controls`` split: the two hands audibly do
 different, mirrored things, not the same effect twice.
+
+Gain-riser design
+------------------
+A gain riser multiplies every sample in the window by a factor that follows
+the *same* ``ENVELOPE_SHAPE["small_hype"]`` / ``_envelope_weight`` curve
+driving the gesture's visual weight, scaled by the event's own ``strength`` -
+the same "the effect and the gesture are the same curve" contract described
+above, applied to a different kind of processing. At envelope weight 0 the
+multiplier is exactly ``1.0`` (identity, no boundary click); at weight 1 and
+strength 1 it reaches its deepest boost.
+
+Unlike the filter sweep, a gain boost is not self-limiting: a one-pole filter
+can reshape a signal's spectrum but (short of the transient overshoot already
+guarded against above) cannot manufacture a peak beyond what the dry window
+already needed to represent, so bounding it to the dry window's own peak is a
+free safety net. A gain riser's entire purpose is to exceed the dry peak, so
+that same trick cannot apply - a fixed dB boost multiplied in naively could
+clip already-loud material outright. Instead, the boost actually applied to a
+window is capped by that window's own *available headroom* to a fixed,
+explicit ceiling (``GAIN_RISER_CEILING``, the nominal full-scale magnitude for
+normalised PCM): the target gain is ``min(nominal_boost, ceiling / dry_peak)``,
+so the boosted peak can never cross the ceiling regardless of how hot the dry
+window already was. If the dry window's own peak already exceeds the ceiling
+(the same FLOAT-subtype case ``_render_window`` accounts for), the ceiling is
+raised to match it, so the available headroom ratio is never below 1.0 and the
+riser never *attenuates* already-loud material - it can only add up to the
+nominal boost, capped at zero added headroom in the limit. This is a per-window
+scalar cap (like ``_render_window``'s own ``limit``), not a per-sample one, so
+the envelope's shape in time is preserved exactly; only its ceiling is
+adjusted.
 """
 
 from __future__ import annotations
@@ -74,15 +113,29 @@ from ..animation.dj_behavior import GestureEvent, _envelope_weight
 LOWPASS_DEEP_CUTOFF_HZ = 450.0
 HIGHPASS_DEEP_CUTOFF_HZ = 900.0
 
+# The nominal full-scale magnitude a gain-boosted sample must not cross, for
+# ordinary normalised PCM (soundfile's usual +-1.0 convention). Raised per
+# window to that window's own dry peak if the dry audio already exceeds it
+# (see the module docstring's "Gain-riser design" section) - never lowered,
+# so the riser never attenuates.
+GAIN_RISER_CEILING = 1.0
+
+# Boost, in dB, at the deepest point of a full-weight, full-strength event -
+# the gain-riser analogue of LOWPASS_DEEP_CUTOFF_HZ / HIGHPASS_DEEP_CUTOFF_HZ.
+# 6 dB is a clearly audible "lift", roughly doubling amplitude, without being
+# a jarring jump - a fixed, documented constant, not derived from the track.
+GAIN_RISER_MAX_BOOST_DB = 6.0
+
 # Bumped whenever a change here would render different output for the same
 # input samples and the same GestureEvent schedule (a cutoff, an envelope
 # shape, a windowing/clipping rule, ...). ``app.processed_audio_path`` folds
 # this into its cache key precisely so a render cached under an older version
 # of this module is never served after such a change - the same role
 # ``features.SCHEMA_VERSION`` plays for the analysis cache.
-EFFECT_VERSION = 1
+EFFECT_VERSION = 2
 
 _KIND = "hand_to_deck"
+_HYPE_KIND = "small_hype"
 
 
 def _lowpass_alpha_at_cutoff(cutoff_hz: float, sample_rate: int) -> float:
@@ -97,7 +150,7 @@ def _highpass_alpha_at_cutoff(cutoff_hz: float, sample_rate: int) -> float:
     return 1.0 / (1.0 + d)
 
 
-def _progress_and_weight(n_points: int) -> tuple[np.ndarray, np.ndarray]:
+def _progress_and_weight(n_points: int, kind: str) -> tuple[np.ndarray, np.ndarray]:
     """``n_points`` samples spanning progress 0..1 inclusive, and their weight.
 
     Reuses ``_envelope_weight`` directly (element by element) rather than a
@@ -106,7 +159,7 @@ def _progress_and_weight(n_points: int) -> tuple[np.ndarray, np.ndarray]:
     gesture - not a numpy port of it that could quietly drift.
     """
     progress = np.linspace(0.0, 1.0, n_points)
-    weight = np.array([_envelope_weight(_KIND, float(p)) for p in progress])
+    weight = np.array([_envelope_weight(kind, float(p)) for p in progress])
     return progress, weight
 
 
@@ -235,11 +288,87 @@ def apply_hand_to_deck_effects(
         if n_points < 2:
             continue
 
-        _progress, weight = _progress_and_weight(n_points)
+        _progress, weight = _progress_and_weight(n_points, _KIND)
         window = out[start_idx:end_idx]
         out[start_idx:end_idx] = _render_window(
             window, weight, event.strength, event.side, sample_rate
         )
+
+    if was_1d:
+        out = out[:, 0]
+    return out
+
+
+def _target_gain_for_window(window: np.ndarray) -> float:
+    """The deepest gain this window's own dry peak can take without crossing
+    ``GAIN_RISER_CEILING`` (or, if the dry peak already exceeds it, without
+    exceeding that higher peak) - see the module docstring's "Gain-riser
+    design" section.
+    """
+    nominal = 10.0 ** (GAIN_RISER_MAX_BOOST_DB / 20.0)
+    peak = float(np.max(np.abs(window))) if window.size else 0.0
+    if peak <= 0.0:
+        return nominal
+    ceiling = max(GAIN_RISER_CEILING, peak)
+    return min(nominal, ceiling / peak)
+
+
+def _render_hype_window(x: np.ndarray, weight: np.ndarray, strength: float) -> np.ndarray:
+    """Gain-boosted samples for one ``small_hype`` event's window.
+
+    ``weight`` is exactly 0.0 at index 0 and index -1 (``_envelope_weight``'s
+    own contract), so ``depth`` and therefore the applied gain are exactly
+    1.0 there - an exact identity multiply, matching ``_render_window``'s own
+    boundary guarantee for the filter sweep. The explicit endpoint
+    reassignment below is kept for the same reason it is kept there: a
+    floating-point safety net, not load-bearing for correctness.
+    """
+    depth = weight * min(max(strength, 0.0), 1.0)
+    target_gain = _target_gain_for_window(x)
+    gain = (1.0 + depth * (target_gain - 1.0)).astype(x.dtype)
+    y = x * gain[:, None]
+    y[0] = x[0]
+    y[-1] = x[-1]
+    return y
+
+
+def apply_small_hype_effects(
+    samples: np.ndarray,
+    sample_rate: int,
+    events: Sequence[GestureEvent],
+) -> np.ndarray:
+    """Render every scheduled ``small_hype`` event's gain riser into ``samples``.
+
+    Same shape and no-op contract as ``apply_hand_to_deck_effects``: mono
+    ``(n,)`` or multi-channel ``(n, channels)`` PCM in, a new array of the same
+    shape and dtype out, the input never mutated, every sample outside a
+    ``small_hype`` event's own ``[start, start + duration]`` window copied
+    through bit-identical, and an empty or all-non-small_hype event list a
+    byte-for-byte no-op.
+    """
+    out = np.array(samples, dtype=samples.dtype, copy=True)
+    was_1d = out.ndim == 1
+    if was_1d:
+        out = out[:, None]
+
+    total = out.shape[0]
+    for event in events:
+        if event.kind != _HYPE_KIND:
+            continue
+
+        start_idx = int(round(event.start * sample_rate))
+        span = max(1, int(round(event.duration * sample_rate)))
+        n_points = span + 1
+        if start_idx >= total:
+            continue
+        end_idx = min(start_idx + n_points, total)
+        n_points = end_idx - start_idx
+        if n_points < 2:
+            continue
+
+        _progress, weight = _progress_and_weight(n_points, _HYPE_KIND)
+        window = out[start_idx:end_idx]
+        out[start_idx:end_idx] = _render_hype_window(window, weight, event.strength)
 
     if was_1d:
         out = out[:, 0]
