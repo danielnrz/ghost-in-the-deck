@@ -58,43 +58,51 @@ FX_CACHE_DIR = ROOT / "cache" / "audio_fx"
 
 
 def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
-    """Render ``wav`` through the hand_to_deck filter sweep once, then cache it.
+    """Render ``wav`` through the hand_to_deck sweep and small_hype riser, then cache it.
 
     The cache key folds in the source wav's own identity (path, size, mtime),
     the effect implementation's own version, and every hand_to_deck event's
-    own timing/side/strength, so a stale render is never served after the
-    audio, the effect implementation, or the seed/schedule that derives the
-    sweep changes - the same principle ``decode._cache_path`` uses for the
-    plain decode, extended to include what this stage adds on top. Event
-    fields are serialised via ``float.hex()`` (an exact, lossless
+    own timing/side/strength plus every small_hype event's own timing/strength
+    (small_hype ignores ``side`` - see ``effects.py``'s module docstring - so
+    it is deliberately left out here too), so a stale render is never served
+    after the audio, the effect implementation, or the seed/schedule that
+    derives either effect changes - the same principle ``decode._cache_path``
+    uses for the plain decode, extended to include what this stage adds on
+    top. Event fields are serialised via ``float.hex()`` (an exact, lossless
     representation) rather than a fixed number of decimal digits, so two
     schedules that differ below the sixth decimal place cannot collide on the
     same key and share a stale render.
 
-    A schedule with no hand_to_deck events at all has nothing to render:
-    returning ``wav`` itself (rather than writing a "processed" copy that
-    just re-encodes it) is what makes ``apply_hand_to_deck_effects``'s own
-    no-op contract - same values, same dtype - hold all the way out to what
-    actually gets played, instead of the file arriving at playback with a
-    different sample format than the one on disk.
+    A schedule with no hand_to_deck events and no small_hype events at all has
+    nothing to render: returning ``wav`` itself (rather than writing a
+    "processed" copy that just re-encodes it) is what makes both effect
+    functions' own no-op contract - same values, same dtype - hold all the way
+    out to what actually gets played, instead of the file arriving at playback
+    with a different sample format than the one on disk.
 
     The render is written back in the source wav's own subtype (``PCM_16``
     for the common case, since that is what ``audio/decode.py`` produces, but
     a hand-supplied ``.wav`` reaches this function unchanged and can carry
     any subtype soundfile can read - including ``FLOAT``, whose valid range
     is not clamped to +-1). Writing that back through a hardcoded ``PCM_16``
-    would silently saturate any sample the effect's own clipping deliberately
-    left above that range (see ``effects._render_window``'s ``limit``, which
-    is derived from the dry window's own peak, not from PCM_16's ceiling).
-    Matching the source subtype keeps the write lossless for exactly the
-    samples the effect already decided were valid to keep.
+    would silently saturate any sample either effect's own bounding
+    deliberately left above that range (see ``effects._render_window``'s
+    ``limit`` and ``effects._target_gain_for_window``'s ceiling, both derived
+    from the dry window's own peak, not from PCM_16's ceiling). Matching the
+    source subtype keeps the write lossless for exactly the samples the
+    effects already decided were valid to keep.
     """
-    events_key = "|".join(
+    hand_to_deck_key = "|".join(
         f"{e.start.hex()}:{e.duration.hex()}:{e.side}:{e.strength.hex()}"
         for e in behavior.events
         if e.kind == "hand_to_deck"
     )
-    if not events_key:
+    small_hype_key = "|".join(
+        f"{e.start.hex()}:{e.duration.hex()}:{e.strength.hex()}"
+        for e in behavior.events
+        if e.kind == "small_hype"
+    )
+    if not hand_to_deck_key and not small_hype_key:
         return wav
 
     # Known limitation: this keys on path/size/mtime_ns, not file contents, so
@@ -103,7 +111,8 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     stat = wav.stat()
     key = (
         f"{wav.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:"
-        f"effect_v{EFFECT_VERSION}:{behavior.seed}:{events_key}"
+        f"effect_v{EFFECT_VERSION}:{behavior.seed}:"
+        f"hand_to_deck={hand_to_deck_key}:small_hype={small_hype_key}"
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
     target = FX_CACHE_DIR / f"{wav.stem}-{digest}.wav"
@@ -112,11 +121,12 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
 
     import soundfile as sf
 
-    from .audio.effects import apply_hand_to_deck_effects
+    from .audio.effects import apply_hand_to_deck_effects, apply_small_hype_effects
 
     source_subtype = sf.info(str(wav)).subtype
     data, sample_rate = sf.read(str(wav), dtype="float64", always_2d=True)
     processed = apply_hand_to_deck_effects(data, sample_rate, behavior.events)
+    processed = apply_small_hype_effects(processed, sample_rate, behavior.events)
 
     FX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".partial.wav")
@@ -378,8 +388,9 @@ def main() -> None:
         "--no-fx",
         action="store_true",
         help=(
-            "disable the hand_to_deck filter sweep; play the decoded track "
-            "unprocessed, for A/B comparison (effects are on by default)"
+            "disable the hand_to_deck filter sweep and the small_hype gain "
+            "riser; play the decoded track unprocessed, for A/B comparison "
+            "(effects are on by default)"
         ),
     )
     parser.add_argument(
