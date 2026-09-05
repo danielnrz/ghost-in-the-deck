@@ -130,6 +130,15 @@ class TrackDeckStructureWrapper(unittest.TestCase):
                 S.structure_at(broad, timeline, t),
             )
 
+    def test_structure_regime_never_leaves_the_non_semantic_vocabulary(self):
+        # The wrapper must not introduce a guessed section label: only the
+        # structure layer's four descriptive regimes may ever come out.
+        allowed = {"build", "release", "peak", "stable"}
+        for features in (_features_a(), _features_b()):
+            deck = TrackDeck.from_features(features)
+            for t in _sample_times(features.duration_seconds):
+                self.assertIn(deck.structure_at(t).regime, allowed)
+
 
 if __name__ == "__main__":
     unittest.main()
