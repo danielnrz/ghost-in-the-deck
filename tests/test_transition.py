@@ -391,6 +391,25 @@ class PlanTransition(unittest.TestCase):
         self.assertEqual(plan.reason, "hand picked")
 
 
+class BeatlessDeck(unittest.TestCase):
+    """A silent or beatless track analyses to bpm=0 and zero beats."""
+
+    def _deck(self) -> TrackDeck:
+        features = make_features([], duration=60.0, bpm=0.0, energy=_ramp_then_plateau)
+        return TrackDeck.from_features(dataclasses.replace(features, track="silent"))
+
+    def test_bpm_ratio_is_defined_when_a_deck_has_no_tempo(self):
+        silent = self._deck()
+        self.assertEqual(TwoDeckContext(silent, _deck_b()).bpm_ratio, 0.0)
+        # deck_b beatless is still a plain division, no crash.
+        self.assertEqual(TwoDeckContext(_deck_a(), silent).bpm_ratio, 0.0)
+
+    def test_plan_transition_declines_rather_than_raising(self):
+        silent = self._deck()
+        self.assertIsNone(plan_transition(TwoDeckContext(silent, _deck_b())))
+        self.assertIsNone(plan_transition(TwoDeckContext(_deck_a(), silent)))
+
+
 class NoInventedSemantics(unittest.TestCase):
     def _sample_times(self, duration: float):
         return [i * 1.0 for i in range(1, int(duration))]

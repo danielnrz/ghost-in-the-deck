@@ -5,8 +5,8 @@ and is kept deliberately separate from the single-track decision layer: it never
 imports ``dj_planner`` or ``dj_behavior``. It is Panda3D-free.
 
 ``TwoDeckContext`` pairs two ``TrackDeck`` objects and exposes only raw,
-deterministic measurements derived live from the two decks - no fit or
-matching verdict about the pair, no pitch guessing, no section detection.
+deterministic measurements derived live from the two decks - tempo ratio,
+tempo gap, durations and bar lengths. Nothing here is an interpretation.
 
 ``TransitionPlan`` is a frozen data object recording one already-chosen pair of
 cue points plus the measured quantities around it. Building one does no audio
@@ -53,7 +53,14 @@ class TwoDeckContext:
 
     @property
     def bpm_ratio(self) -> float:
-        """``deck_b`` tempo as a multiple of ``deck_a`` tempo."""
+        """``deck_b`` tempo as a multiple of ``deck_a`` tempo.
+
+        ``0.0`` when ``deck_a`` has no measured tempo (a silent or beatless
+        track analyses to ``bpm == 0``): the ratio is undefined, and a caller
+        that needs a real tempo pairing should check ``bpm`` first.
+        """
+        if self.deck_a.bpm <= 0.0:
+            return 0.0
         return self.deck_b.bpm / self.deck_a.bpm
 
     @property
@@ -146,8 +153,8 @@ class TransitionPlan:
     A pure data object: constructing or holding a ``TransitionPlan`` performs no
     audio processing, no crossfade and no EQ - it only records measured
     quantities taken from the two decks and the two chosen cue points. Every
-    field traces back to a measurement or to a named module constant; nothing
-    here is a compatibility verdict or a guessed song section.
+    field traces back to a measurement or to a named module constant; no field
+    is an interpretation of the two tracks.
     """
 
     outgoing_track: str
@@ -251,10 +258,15 @@ def plan_transition(
     ``outgoing.time``, then earliest ``incoming.time``.
 
     Returns ``None`` when either deck yields zero candidates - including when a
-    deck is too slow or too short for a full transition to fit after any cue. It
-    never fabricates a cue point to force a plan. Fully deterministic: the same
-    two ``TrackDeck`` objects give a byte-identical result every call.
+    deck is too slow or too short for a full transition to fit after any cue, or
+    when a deck analysed to ``bpm == 0`` (silent or beatless) so there is no
+    tempo to plan a beat-matched move against. It never fabricates a cue point
+    to force a plan. Fully deterministic: the same two ``TrackDeck`` objects give
+    a byte-identical result every call.
     """
+    if context.deck_a.bpm <= 0.0 or context.deck_b.bpm <= 0.0:
+        return None
+
     outgoing_candidates = candidate_cue_points(
         context.deck_a,
         margin_seconds=margin_seconds,

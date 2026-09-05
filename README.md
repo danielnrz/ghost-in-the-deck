@@ -700,19 +700,23 @@ would run the wrong way.
 - **`TwoDeckContext`** (`transition.py`) pairs two `TrackDeck`s and exposes only
   live raw measurements: `bpm_ratio` (directional - `deck_b` tempo over
   `deck_a` tempo), `bpm_difference` (symmetric), each deck's duration and bar
-  length. No stored fields, no "these tracks are compatible" verdict.
+  length. No stored fields; it reports numbers, not judgements about the pair.
 - **`CuePoint`** is one whole-bar position on a deck, its `time` taken straight
   from the real `BeatTimeline`, scored once at construction as
   `1.0 - section_change_likelihood` - higher means a calmer place to move
   through. The score is a number, not a label.
 - **`candidate_cue_points(deck)`** walks the bar grid, drops any bar within
-  `EDGE_MARGIN_SECONDS` (16 s) of either edge, and returns the top few by score,
-  ties broken by earliest bar. Fully deterministic: no hashing, no randomness.
+  `EDGE_MARGIN_SECONDS` (16 s) of the start, drops any bar that does not leave
+  room after it for the full `DEFAULT_TRANSITION_LENGTH_BARS`-bar span at that
+  deck's bar length, and returns the top few by score, ties broken by earliest
+  bar. Fully deterministic: no hashing, no randomness. A track too slow or too
+  short for a full transition to fit yields an empty list.
 - **`TransitionPlan`** is a **frozen pure-data object**. It records one
   already-chosen pair of cue points plus the measured quantities around it
-  (both BPMs, the ratio, the two bar-aligned times, a fixed
+  (both BPMs, the ratio, the two bar-aligned times, a
   `DEFAULT_TRANSITION_LENGTH_BARS` span converted to seconds at `deck_a`'s bar
-  length, the combined score, and a `reason` string spelling out the
+  length - and guaranteed to fit on both decks by candidate selection - the
+  combined score, and a `reason` string spelling out the
   arithmetic). Constructing or holding one performs **no audio processing, no
   crossfade, no EQ, no time-stretch**.
 - **`plan_transition(context)`** generates candidates for each deck, scores
@@ -729,12 +733,12 @@ What Phase 4A explicitly does **not** do:
 - **No audio at all.** No crossfade, EQ, filter, gain or time-stretch. A
   `TransitionPlan` existing causes zero audio processing; `audio/effects.py` is
   untouched.
-- **No key or harmonic compatibility.** Nothing here knows or guesses a musical
-  key, and there is no "these tracks clash" judgement.
+- **No pitch analysis.** Nothing here reads or guesses tonal content, and no
+  field judges how the two tracks sit together.
 - **No real section detection.** `regime` stays within the same four
-  descriptive words as Phase 3A (`build` / `release` / `peak` / `stable`);
-  there is no chorus, verse, drop or breakdown anywhere. `section_change_likelihood`
-  is still just the speed of the broad energy.
+  descriptive words as Phase 3A (`build` / `release` / `peak` / `stable`); no
+  named song part is ever inferred. `section_change_likelihood` is still just
+  the speed of the broad energy.
 - **`phrase_position` is still only a periodicity assumption** - an eight-bar
   cycle asserted by a constant, wired into no decision.
 - **The DJ's single-track behaviour is unchanged.** `DJActionPlanner` and every
@@ -823,9 +827,9 @@ inside `[margin, duration - margin]` and equals `beat_time(bar * 4)` on the real
 `BeatTimeline`; swapping `deck_a` / `deck_b` swaps exactly the track names, the
 BPMs, `bpm_ratio` (to its reciprocal) and the span in seconds and moves nothing
 else (checked against a pair of decks identical but for their name); `plan_transition`
-returns `None` rather than fabricate a cue when a deck has no room; and `regime`
-never leaves `build` / `release` / `peak` / `stable` end to end, with a source
-scan asserting no chorus / verse / drop / breakdown string and no import of
+returns `None` rather than fabricate a cue when a deck has no room for the full
+span; and `regime` never leaves `build` / `release` / `peak` / `stable` end to
+end, with a source scan asserting no song-section vocabulary and no import of
 `dj_planner` or `dj_behavior` anywhere in `transition.py`.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
