@@ -27,7 +27,7 @@ from panda3d.core import loadPrcFileData
 
 from .animation.controller import AvatarAnimator
 from .animation.cues import BeatTimeline
-from .animation.dj_behavior import DJBehaviorEngine
+from .animation.dj_behavior import DJBehaviorEngine, GestureEvent
 from .animation.groove import GrooveEngine
 from .animation.workstation import DEFAULT_TARGETS
 from .animation.rig import AvatarRig
@@ -58,27 +58,34 @@ FX_CACHE_DIR = ROOT / "cache" / "audio_fx"
 
 
 def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
-    """Render ``wav`` through the hand_to_deck sweep and small_hype riser, then cache it.
+    """Render ``wav`` through the planned filter sweeps and gain risers, then cache it.
+
+    Phase 2A: which effect (if any) plays at a scheduled moment is decided by
+    ``DJActionPlanner`` from the music's own energy at that moment, not from
+    which gesture ``kind`` happened to be scheduled. The planner reads only
+    each event's ``.start`` / ``.duration``; the two DSP functions in
+    ``audio/effects.py`` are reused byte-for-byte.
 
     The cache key folds in the source wav's own identity (path, size, mtime),
-    the effect implementation's own version, and every hand_to_deck event's
-    own timing/side/strength plus every small_hype event's own timing/strength
-    (small_hype ignores ``side`` - see ``effects.py``'s module docstring - so
-    it is deliberately left out here too), so a stale render is never served
-    after the audio, the effect implementation, or the seed/schedule that
-    derives either effect changes - the same principle ``decode._cache_path``
-    uses for the plain decode, extended to include what this stage adds on
-    top. Event fields are serialised via ``float.hex()`` (an exact, lossless
-    representation) rather than a fixed number of decimal digits, so two
-    schedules that differ below the sixth decimal place cannot collide on the
-    same key and share a stale render.
+    the effect implementation's own version, the planner's decision-rule
+    version, and every *planned* filter sweep's timing/side/strength plus every
+    *planned* gain riser's timing/strength (the riser ignores ``side`` - see
+    ``effects.py``'s module docstring - so it is deliberately left out here
+    too), so a stale render is never served after the audio, the effect
+    implementation, or the decision that derives either effect changes - the
+    same principle ``decode._cache_path`` uses for the plain decode, extended
+    to include what this stage adds on top. Fields are serialised via
+    ``float.hex()`` (an exact, lossless representation) rather than a fixed
+    number of decimal digits, so two plans that differ below the sixth decimal
+    place cannot collide on the same key and share a stale render.
 
-    A schedule with no hand_to_deck events and no small_hype events at all has
-    nothing to render: returning ``wav`` itself (rather than writing a
-    "processed" copy that just re-encodes it) is what makes both effect
-    functions' own no-op contract - same values, same dtype - hold all the way
-    out to what actually gets played, instead of the file arriving at playback
-    with a different sample format than the one on disk.
+    A plan with no filter sweeps and no gain risers - however many gestures
+    were scheduled, or which kinds - has nothing to render: returning ``wav``
+    itself (rather than writing a "processed" copy that just re-encodes it) is
+    what makes both effect functions' own no-op contract - same values, same
+    dtype - hold all the way out to what actually gets played, instead of the
+    file arriving at playback with a different sample format than the one on
+    disk.
 
     The render is written back in the source wav's own subtype (``PCM_16``
     for the common case, since that is what ``audio/decode.py`` produces, but
@@ -92,17 +99,24 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     source subtype keeps the write lossless for exactly the samples the
     effects already decided were valid to keep.
     """
-    hand_to_deck_key = "|".join(
-        f"{e.start.hex()}:{e.duration.hex()}:{e.side}:{e.strength.hex()}"
-        for e in behavior.events
-        if e.kind == "hand_to_deck"
+    from .dj_planner import PLANNER_VERSION, DJActionPlanner
+
+    # One deterministic pass: the planner turns the gesture schedule's timing
+    # into an independent audio-action plan from the music's energy. It reuses
+    # the per-track seed, never a gesture's kind/side/strength.
+    planned = DJActionPlanner(behavior.seed).plan(behavior.events, behavior.energy)
+    sweeps = [a for a in planned if a.action == "filter_sweep"]
+    risers = [a for a in planned if a.action == "gain_riser"]
+
+    sweep_key = "|".join(
+        f"{a.start.hex()}:{a.duration.hex()}:{a.side}:{a.strength.hex()}"
+        for a in sweeps
     )
-    small_hype_key = "|".join(
-        f"{e.start.hex()}:{e.duration.hex()}:{e.strength.hex()}"
-        for e in behavior.events
-        if e.kind == "small_hype"
+    riser_key = "|".join(
+        f"{a.start.hex()}:{a.duration.hex()}:{a.strength.hex()}"
+        for a in risers
     )
-    if not hand_to_deck_key and not small_hype_key:
+    if not sweep_key and not riser_key:
         return wav
 
     # Known limitation: this keys on path/size/mtime_ns, not file contents, so
@@ -111,8 +125,8 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     stat = wav.stat()
     key = (
         f"{wav.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:"
-        f"effect_v{EFFECT_VERSION}:{behavior.seed}:"
-        f"hand_to_deck={hand_to_deck_key}:small_hype={small_hype_key}"
+        f"effect_v{EFFECT_VERSION}:planner_v{PLANNER_VERSION}:{behavior.seed}:"
+        f"filter_sweep={sweep_key}:gain_riser={riser_key}"
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
     target = FX_CACHE_DIR / f"{wav.stem}-{digest}.wav"
@@ -125,8 +139,22 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
 
     source_subtype = sf.info(str(wav)).subtype
     data, sample_rate = sf.read(str(wav), dtype="float64", always_2d=True)
-    processed = apply_hand_to_deck_effects(data, sample_rate, behavior.events)
-    processed = apply_small_hype_effects(processed, sample_rate, behavior.events)
+
+    # ``kind`` here is the DSP-dispatch label each effect function filters its
+    # input on - not a claim about which gesture is visually happening then.
+    # The planner already decided *which* effect and *how strong*; this only
+    # reshapes each PlannedAudioAction into the sequence shape the existing,
+    # unchanged effect functions expect.
+    sweep_events = [
+        GestureEvent(a.start, a.duration, "hand_to_deck", a.side, a.strength)
+        for a in sweeps
+    ]
+    riser_events = [
+        GestureEvent(a.start, a.duration, "small_hype", a.side, a.strength)
+        for a in risers
+    ]
+    processed = apply_hand_to_deck_effects(data, sample_rate, sweep_events)
+    processed = apply_small_hype_effects(processed, sample_rate, riser_events)
 
     FX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".partial.wav")

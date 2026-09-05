@@ -24,6 +24,16 @@ the fx cache key only ever folded in hand_to_deck events, so a track whose
 schedule carries only small_hype events was never rendered, and a schedule
 change limited to small_hype events (with hand_to_deck events unchanged)
 could not invalidate a previous render.
+
+Phase 2A (the DJ action planner):
+which audio effect plays at a scheduled moment is now decided by
+``DJActionPlanner`` from the music's own energy there, not from the scheduled
+gesture's ``kind``. ``TestPlannerAudioWiring`` proves a gesture kind is no
+longer required for an effect (an all-deck_glance schedule still renders when
+the music justifies one) nor sufficient for one (an all-hand_to_deck schedule
+in the low-energy band renders nothing), and that the fx cache key folds in
+the planner's decision-rule version and the planned actions, not the raw
+gesture fields.
 """
 
 from __future__ import annotations
@@ -249,12 +259,25 @@ class TestDebugArgumentValidation(unittest.TestCase):
             positive_int("0")
 
 
+def _energy_track(energy=0.8, duration=120.0):
+    """An EnergyTrack over a synthetic track. ``energy`` may be a constant or a
+    callable of frame time - a flat value normalises to the mid band, so a
+    default ``_FakeBehavior`` plans a filter sweep at any event time."""
+    features = make_features(
+        regular_beats(bpm=120.0, count=int(duration / 0.5)),
+        duration=duration,
+        energy=energy,
+    )
+    return EnergyTrack(features)
+
+
 class _FakeBehavior:
     """Stands in for DJBehaviorEngine: processed_audio_path only reads these."""
 
-    def __init__(self, events, seed="test"):
+    def __init__(self, events, seed="test", energy=None):
         self.events = events
         self.seed = seed
+        self.energy = energy if energy is not None else _energy_track()
 
 
 def _write_wav(path: Path, sample_count: int, amplitude: float) -> None:
@@ -393,74 +416,132 @@ class TestHandToDeckEffectWiring(unittest.TestCase):
             )
 
 
-class TestSmallHypeEffectWiring(unittest.TestCase):
-    """Phase 1D: the fx cache must react to small_hype events too."""
+class TestPlannerAudioWiring(unittest.TestCase):
+    """Phase 2A: the audio effect is chosen from the music's energy at a
+    scheduled moment, not from that moment's gesture ``kind``."""
 
-    def test_a_schedule_with_only_small_hype_events_is_actually_rendered(self):
-        """A track with small_hype events but no hand_to_deck events used to
-        fall through the (hand_to_deck-only) events_key check and be served
-        unprocessed. It must now be rendered like any other non-empty
-        schedule."""
+    def _step_energy(self, quiet_before=30.0, duration=120.0):
+        """Low energy before ``quiet_before`` seconds, high after - a real
+        low/high split, unlike a flat value (which normalises to the mid band)."""
+        return _energy_track(
+            energy=lambda t: 0.05 if t < quiet_before else 0.9,
+            duration=duration,
+        )
+
+    def test_all_deck_glance_schedule_still_produces_audio(self):
+        """A gesture's kind is no longer required for an audio effect: a
+        schedule with zero hand_to_deck / small_hype events still renders when
+        the musical context at those events' times justifies an action."""
         import tempfile
 
         from ghost_in_the_deck.animation.dj_behavior import GestureEvent
 
-        events = [GestureEvent(0.1, 0.2, "small_hype", "l", 0.9)]
+        events = [
+            GestureEvent(t, 0.6, "deck_glance", None, 0.4)
+            for t in (40.0, 44.0, 48.0)
+        ]
+        behavior = _FakeBehavior(events=events, energy=self._step_energy())
 
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "track.wav"
-            _write_wav(wav, 44100, 0.5)
+            _write_wav(wav, int(44100 * 50.0), 0.3)
 
-            result = processed_audio_path(wav, _FakeBehavior(events=events))
+            result = processed_audio_path(wav, behavior)
 
             self.assertNotEqual(result, wav)
             self.assertTrue(result.is_file())
 
-    def test_changing_only_the_small_hype_schedule_changes_the_cache_key(self):
-        """Two schedules that agree on every hand_to_deck event but differ in
-        their small_hype events must not share a cache entry."""
+    def test_all_hand_to_deck_in_low_energy_produces_no_processed_file(self):
+        """A gesture's mere existence no longer guarantees an audio effect: an
+        all-hand_to_deck schedule placed entirely in the low-energy band plans
+        nothing, so the dry source wav is served unchanged."""
         import tempfile
 
         from ghost_in_the_deck.animation.dj_behavior import GestureEvent
 
-        htd_event = GestureEvent(0.4, 0.2, "hand_to_deck", "l", 0.9)
-        events_a = [htd_event, GestureEvent(1.0, 0.2, "small_hype", "l", 0.9)]
-        events_b = [htd_event, GestureEvent(1.0, 0.2, "small_hype", "l", 0.5)]
+        events = [
+            GestureEvent(t, 1.0, "hand_to_deck", "l", 0.9)
+            for t in (6.0, 14.0, 22.0)
+        ]
+        behavior = _FakeBehavior(events=events, energy=self._step_energy())
 
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "track.wav"
-            _write_wav(wav, int(44100 * 2.0), 0.3)
+            _write_wav(wav, 44100, 0.3)
+            before = wav.read_bytes()
 
-            target_a = processed_audio_path(wav, _FakeBehavior(events=events_a))
-            target_b = processed_audio_path(wav, _FakeBehavior(events=events_b))
+            result = processed_audio_path(wav, behavior)
 
-            self.assertNotEqual(
-                target_a, target_b,
-                "a small_hype-only schedule change reused the previous cache entry",
-            )
-            self.assertNotEqual(target_a.read_bytes(), target_b.read_bytes())
+            self.assertEqual(result, wav)
+            self.assertEqual(wav.read_bytes(), before)
 
-    def test_small_hype_side_is_not_folded_into_the_cache_key(self):
-        """The riser ignores side, so two schedules differing only in a
-        small_hype event's side must render identically and share a cache
-        entry - folding in a field the effect does not use would just cause
-        needless re-renders."""
+    def test_planner_version_bump_invalidates_the_cache(self):
+        """A render cached under one PLANNER_VERSION must not be served once the
+        decision rule's version changes, even though effects.py, the wav and
+        the schedule are unchanged."""
         import tempfile
+        from unittest import mock
 
+        from ghost_in_the_deck import dj_planner
         from ghost_in_the_deck.animation.dj_behavior import GestureEvent
 
-        events_l = [GestureEvent(0.4, 0.2, "small_hype", "l", 0.9)]
-        events_r = [GestureEvent(0.4, 0.2, "small_hype", "r", 0.9)]
+        events = [GestureEvent(0.4, 0.3, "deck_glance", None, 0.5)]
+        behavior = _FakeBehavior(events=events)
 
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "track.wav"
             _write_wav(wav, int(44100 * 1.0), 0.3)
 
-            target_l = processed_audio_path(wav, _FakeBehavior(events=events_l))
-            target_r = processed_audio_path(wav, _FakeBehavior(events=events_r))
+            with mock.patch.object(dj_planner, "PLANNER_VERSION", 1):
+                first_target = processed_audio_path(wav, behavior)
+            with mock.patch.object(dj_planner, "PLANNER_VERSION", 2):
+                second_target = processed_audio_path(wav, behavior)
 
-            self.assertEqual(target_l, target_r)
-            self.assertEqual(target_l.read_bytes(), target_r.read_bytes())
+            self.assertNotEqual(
+                first_target, second_target,
+                "a PLANNER_VERSION bump reused the previous cache entry",
+            )
+
+    def test_changing_a_planned_actions_timing_changes_the_cache_key(self):
+        """The one field carried over from a candidate event - its timing -
+        still invalidates the cache when it moves."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        events_a = [GestureEvent(0.30, 0.2, "deck_glance", None, 0.5)]
+        events_b = [GestureEvent(0.55, 0.2, "deck_glance", None, 0.5)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, int(44100 * 1.0), 0.3)
+
+            target_a = processed_audio_path(wav, _FakeBehavior(events=events_a))
+            target_b = processed_audio_path(wav, _FakeBehavior(events=events_b))
+
+            self.assertNotEqual(target_a, target_b)
+            self.assertNotEqual(target_a.read_bytes(), target_b.read_bytes())
+
+    def test_gesture_fields_the_planner_ignores_do_not_change_the_cache_key(self):
+        """Two schedules sharing only start/duration - different kind, side and
+        strength - must render byte-for-byte identically: the planner's audio
+        decision reads none of those fields, so neither does the cache key."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        events_a = [GestureEvent(0.4, 0.3, "deck_glance", None, 0.10)]
+        events_b = [GestureEvent(0.4, 0.3, "hand_to_deck", "r", 0.99)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, int(44100 * 1.0), 0.3)
+
+            target_a = processed_audio_path(wav, _FakeBehavior(events=events_a))
+            target_b = processed_audio_path(wav, _FakeBehavior(events=events_b))
+
+            self.assertEqual(target_a, target_b)
+            self.assertEqual(target_a.read_bytes(), target_b.read_bytes())
 
 
 if __name__ == "__main__":
