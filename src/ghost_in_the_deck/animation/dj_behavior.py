@@ -125,6 +125,18 @@ def _unit(seed: str, bar: int, channel: int) -> float:
 _SEED_SALT = "dj-behavior"
 
 
+def trend_at(energy: EnergyTrack, time: float) -> float:
+    """Energy now minus energy ``TREND_LOOKBACK`` seconds ago, clamped at t=0.
+
+    Module-level so the gesture scheduler here and the audio-action planner in
+    ``dj_planner.py`` reason about "rising" from one shared definition rather
+    than two copies that could drift apart. ``DJBehaviorEngine._trend`` is a
+    thin bound wrapper over this; nothing else about scheduling changed.
+    """
+    earlier = max(0.0, time - TREND_LOOKBACK)
+    return energy.at(time) - energy.at(earlier)
+
+
 def _smoothstep(x: float) -> float:
     x = min(max(x, 0.0), 1.0)
     return x * x * (3.0 - 2.0 * x)
@@ -208,8 +220,7 @@ class DJBehaviorEngine:
     # ------------------------------------------------------------- schedule
     def _trend(self, time: float) -> float:
         """Energy now minus energy a few seconds ago, clamped to the track."""
-        earlier = max(0.0, time - TREND_LOOKBACK)
-        return self.energy.at(time) - self.energy.at(earlier)
+        return trend_at(self.energy, time)
 
     def _kind_weights(self, time: float) -> dict[str, float]:
         """How much each action kind fits the music right now."""
