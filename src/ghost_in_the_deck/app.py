@@ -77,6 +77,17 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
     no-op contract - same values, same dtype - hold all the way out to what
     actually gets played, instead of the file arriving at playback with a
     different sample format than the one on disk.
+
+    The render is written back in the source wav's own subtype (``PCM_16``
+    for the common case, since that is what ``audio/decode.py`` produces, but
+    a hand-supplied ``.wav`` reaches this function unchanged and can carry
+    any subtype soundfile can read - including ``FLOAT``, whose valid range
+    is not clamped to +-1). Writing that back through a hardcoded ``PCM_16``
+    would silently saturate any sample the effect's own clipping deliberately
+    left above that range (see ``effects._render_window``'s ``limit``, which
+    is derived from the dry window's own peak, not from PCM_16's ceiling).
+    Matching the source subtype keeps the write lossless for exactly the
+    samples the effect already decided were valid to keep.
     """
     events_key = "|".join(
         f"{e.start.hex()}:{e.duration.hex()}:{e.side}:{e.strength.hex()}"
@@ -100,12 +111,13 @@ def processed_audio_path(wav: Path, behavior: DJBehaviorEngine) -> Path:
 
     from .audio.effects import apply_hand_to_deck_effects
 
+    source_subtype = sf.info(str(wav)).subtype
     data, sample_rate = sf.read(str(wav), dtype="float64", always_2d=True)
     processed = apply_hand_to_deck_effects(data, sample_rate, behavior.events)
 
     FX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".partial.wav")
-    sf.write(str(partial), processed, sample_rate, subtype="PCM_16")
+    sf.write(str(partial), processed, sample_rate, subtype=source_subtype)
     partial.replace(target)
     return target
 
