@@ -8,6 +8,10 @@ imports ``dj_planner`` or ``dj_behavior``. It is Panda3D-free.
 deterministic measurements derived live from the two decks - no boolean
 "these tracks are compatible" verdict, no key or harmonic guessing, no
 section detection.
+
+``TransitionPlan`` is a frozen data object recording one already-chosen pair of
+cue points plus the measured quantities around it. Building one does no audio
+processing, loads no sound and touches no effects code.
 """
 
 from __future__ import annotations
@@ -24,6 +28,12 @@ EDGE_MARGIN_SECONDS = 16.0
 
 # Upper bound on how many cue points one deck contributes to planning.
 MAX_CANDIDATES_PER_DECK = 5
+
+# Default span of a planned transition, in whole bars. Named independently of
+# ``structure.PHRASE_LENGTH_BARS``: the two constants currently share a value but
+# answer different questions - "how many bars to blend across" versus "the
+# length of the assumed phrase cycle" - so neither should track the other.
+DEFAULT_TRANSITION_LENGTH_BARS = 8
 
 
 @dataclass(frozen=True)
@@ -116,3 +126,66 @@ def candidate_cue_points(
 
     candidates.sort(key=lambda cue: (-cue.score, cue.bar_index))
     return candidates[:limit]
+
+
+@dataclass(frozen=True)
+class TransitionPlan:
+    """One already-chosen way for ``deck_a`` to move into ``deck_b``.
+
+    A pure data object: constructing or holding a ``TransitionPlan`` performs no
+    audio processing, no crossfade and no EQ - it only records measured
+    quantities taken from the two decks and the two chosen cue points. Every
+    field traces back to a measurement or to a named module constant; nothing
+    here is a compatibility verdict or a guessed song section.
+    """
+
+    outgoing_track: str
+    incoming_track: str
+    outgoing_time: float
+    incoming_time: float
+    outgoing_bar_index: int
+    incoming_bar_index: int
+    bpm_a: float
+    bpm_b: float
+    bpm_ratio: float
+    expected_duration_bars: int
+    expected_duration_seconds: float
+    score: float
+    reason: str
+
+    @classmethod
+    def from_selection(
+        cls,
+        context: TwoDeckContext,
+        outgoing: CuePoint,
+        incoming: CuePoint,
+        score: float,
+        reason: str,
+    ) -> "TransitionPlan":
+        """Assemble a plan from an already-picked pair of cue points.
+
+        ``outgoing`` is a cue point on ``context.deck_a`` (the track being mixed
+        out); ``incoming`` is a cue point on ``context.deck_b`` (the track being
+        mixed in). ``score`` and ``reason`` are supplied by the caller that chose
+        this pair - this constructor neither generates candidates nor ranks
+        them. ``expected_duration_bars`` is fixed at
+        ``DEFAULT_TRANSITION_LENGTH_BARS`` and converted to seconds at
+        ``deck_a``'s bar length.
+        """
+        return cls(
+            outgoing_track=context.deck_a.track,
+            incoming_track=context.deck_b.track,
+            outgoing_time=outgoing.time,
+            incoming_time=incoming.time,
+            outgoing_bar_index=outgoing.bar_index,
+            incoming_bar_index=incoming.bar_index,
+            bpm_a=context.deck_a.bpm,
+            bpm_b=context.deck_b.bpm,
+            bpm_ratio=context.bpm_ratio,
+            expected_duration_bars=DEFAULT_TRANSITION_LENGTH_BARS,
+            expected_duration_seconds=(
+                DEFAULT_TRANSITION_LENGTH_BARS * context.bar_seconds_a
+            ),
+            score=score,
+            reason=reason,
+        )
