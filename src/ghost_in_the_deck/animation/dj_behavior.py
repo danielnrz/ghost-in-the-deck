@@ -14,43 +14,29 @@ cursor, no dependence on which times were asked about before. A renderer stall
 simply skips part of a gesture and resumes at the progress the schedule says is
 current for wherever the clock has moved to.
 
-Selection is deterministic: whether a bar hosts an event, and roughly how far
-apart events fall, are decided by hashing the track's own seed with the bar
-number - the same primitive GrooveEngine's per-bar variation uses, but salted
-independently so an event's placement and its groove personality are two
-different, uncorrelated numbers, not two views of one hidden random source.
-Nothing here calls random().
-
-What an event *is* - its kind, its side, its strength - is not rolled here at
-all. Those come from ``dj_planner``'s deterministic decision functions
-(``decide_gesture_kind`` / ``DJActionPlanner.gesture_side_for`` /
-``planned_strength``) evaluated at the bar's own start time, so the visible
-gesture and the audio action ``dj_planner`` plans for that same moment are two
-readings of one decision rather than two independent weighted rolls.
+The schedule is not built here at all. ``DJBehaviorEngine`` delegates the whole
+thing to ``dj_planner.DJActionPlanner.plan_schedule``, which walks the track's
+bar grid and decides - from the same ``MusicalContext`` its kind / side /
+strength decisions already use - whether each bar hosts an event, how far apart
+events fall, and how long each one runs, then fills in each event's kind, side
+and strength. So the visible gesture and the audio action ``dj_planner`` plans
+for that same moment are two readings of one decision rather than two
+independent rolls. That schedule is deterministic in the track's own seed and
+analysis - nothing here or in ``plan_schedule`` calls random().
 
 Nothing here imports Panda3D.
 """
 
 from __future__ import annotations
 
-import hashlib
 from bisect import bisect_right
 from dataclasses import dataclass
 
 from ..audio.features import MusicFeatures
-from .cues import BEATS_PER_BAR, BeatTimeline
+from .cues import BeatTimeline
 from .energy import EnergyTrack
 
 ACTIONS = ("deck_glance", "lean_in", "hand_to_deck", "small_hype")
-
-# A new gesture may not start less than this many bars after the previous one
-# started. Combined with the activation roll below, real spacing works out
-# noticeably irregular - never "every four bars", which would read as a metronome
-# with a costume on.
-MIN_GAP_BARS = 3
-
-# Chance, per eligible bar, that this bar hosts an event at all.
-ACTIVATION_PROBABILITY = 0.42
 
 # Energy bands the kind weighting reasons about. Not a section classifier -
 # just "restrained / normal / driving", read straight off the same smoothed
@@ -61,14 +47,6 @@ HIGH_ENERGY = 0.75
 # How far back "rising" looks, in seconds, and how big a jump counts as one.
 TREND_LOOKBACK = 3.0
 TREND_RISING = 0.12
-
-# Base duration per kind, in seconds, before the small per-event jitter.
-BASE_DURATION = {
-    "deck_glance": 1.0,
-    "lean_in": 1.6,
-    "hand_to_deck": 1.2,
-    "small_hype": 0.7,
-}
 
 # Attack / hold / release fractions of an event's duration. They sum to 1.0.
 # A glance is quick down and lingers on the way back; a hype gesture is the
@@ -106,24 +84,6 @@ ENVELOPE_SHAPE = {
     "hand_to_deck": (0.45, 0.10, 0.45),
     "small_hype": (0.25, 0.15, 0.60),
 }
-
-
-def _unit(seed: str, bar: int, channel: int) -> float:
-    """A stable pseudo-random 0..1 from a seed, bar number and channel.
-
-    GrooveEngine's own ``_unit`` uses crc32 for this, which is fine for a
-    single independent stream but is a linear checksum: for short, structured
-    inputs like sequential bar numbers it can correlate across the different
-    "channels" fed the same bar at a fixed stride, which is exactly the shape
-    the gesture scheduler produces (bars re-checked at an almost-constant gap).
-    An early version of this file used crc32 and, for some seeds, drew the same
-    gesture kind on every single fired bar - the activation stride and the kind
-    channel were landing on correlated outputs. blake2b has proper avalanche
-    behaviour and does not exhibit that. It is deterministic across runs (it is
-    not salted per process the way hash() is), just not linear.
-    """
-    digest = hashlib.blake2b(f"{seed}:{bar}:{channel}".encode(), digest_size=4).digest()
-    return int.from_bytes(digest, "big") / float(0xFFFFFFFF)
 
 
 # A plain string rather than GrooveEngine's crc32-folded int seed, so gesture
@@ -236,60 +196,18 @@ class DJBehaviorEngine:
         # time, when this module is already fully loaded) keeps the decision
         # logic one-way - dj_planner is the single source, nothing is
         # duplicated back into this file.
-        from ..dj_planner import (
-            DJActionPlanner,
-            context_at,
-            decide_gesture_kind,
-            planned_strength,
-        )
-
-        duration = self.features.duration_seconds
-        nominal = self.timeline.nominal_interval
-        bar_seconds = max(nominal * BEATS_PER_BAR, 1e-3)
-
+        #
+        # The whole schedule - the bar-walk, the activation roll, the gap and
+        # duration jitter, and each event's kind / side / strength - is the
+        # planner's own decision now, computed from the same MusicalContext.
         # Same per-track seed the audio side uses (app.py passes behavior.seed),
         # so a gesture's side and the filter-sweep side dj_planner plans for the
         # same moment are drawn from one number, not two.
-        planner = DJActionPlanner(self.seed)
+        from ..dj_planner import DJActionPlanner
 
-        events: list[GestureEvent] = []
-        bar = 0
-        next_eligible_bar = 0
-        # A generous bound on how many bars a track this long could contain,
-        # so the loop terminates even for pathological feature data.
-        max_bars = int(duration / bar_seconds) + 4
-
-        while bar < max_bars:
-            start = self.timeline.beat_time(bar * BEATS_PER_BAR)
-            if start > duration:
-                break
-
-            if bar >= next_eligible_bar and start >= 1.0:
-                roll = _unit(self.seed, bar, 0)
-                if roll < ACTIVATION_PROBABILITY:
-                    # The bar is hosting an event; what that event *is* is the
-                    # planner's decision, read at this bar's own start time and
-                    # the track's energy there - not an independent kind roll.
-                    context = context_at(self.energy, start)
-                    kind = decide_gesture_kind(context)
-
-                    jitter = 0.85 + 0.3 * _unit(self.seed, bar, 2)
-                    event_duration = BASE_DURATION[kind] * jitter
-                    if start + event_duration > duration:
-                        bar += 1
-                        continue
-
-                    side = planner.gesture_side_for(kind, start)
-                    strength = planned_strength(context)
-
-                    events.append(GestureEvent(start, event_duration, kind, side, strength))
-
-                    gap_bars = MIN_GAP_BARS + int(round(2.0 * _unit(self.seed, bar, 4)))
-                    next_eligible_bar = bar + gap_bars
-
-            bar += 1
-
-        return events
+        return DJActionPlanner(self.seed).plan_schedule(
+            self.timeline, self.energy, self.features.duration_seconds
+        )
 
     # ---------------------------------------------------------------- query
     def state_at(self, time: float) -> DJActionState:
