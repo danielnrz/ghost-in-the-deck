@@ -134,6 +134,15 @@ ACTIVATION_BASE = {"low": 0.28, "mid": 0.42, "high": 0.58}
 # - a build deserves more DJ activity - with the sum then capped at 1.0.
 ACTIVATION_TREND_BOOST = 0.15
 
+# Broad-structure adjustments layered on top of the band/short-trend chance when
+# ``context.structure`` is present. A broad "build" regime nudges the planner
+# busier; a broad "release" regime quieter. The damp is smaller than any band
+# base, so it can never drive the chance to zero; "peak" and "stable" leave the
+# Phase 2C value untouched. With ``structure=None`` neither is applied and the
+# result is byte-identical to Phase 2C.
+STRUCTURE_BUILD_BOOST = 0.10
+STRUCTURE_RELEASE_DAMP = 0.10
+
 
 def _unit(seed: str, value: float, salt: str) -> float:
     """A stable pseudo-random 0..1 from a seed, a number and a salt string.
@@ -296,10 +305,25 @@ def activation_probability(context: MusicalContext) -> float:
     density exactly, while quiet and driving stretches now differ - and a rising
     trend nudges any band busier, the same ``trend > TREND_RISING`` reading
     ``decide_gesture_kind`` already uses to favour ``lean_in``.
+
+    When ``context.structure`` is present, the broad regime layers one bounded
+    adjustment on top: ``"build"`` adds ``STRUCTURE_BUILD_BOOST`` (busier during
+    a broad build), ``"release"`` subtracts ``STRUCTURE_RELEASE_DAMP`` (quieter
+    during a broad release, but never to zero - the damp is smaller than any
+    band base), and ``"peak"`` / ``"stable"`` leave the value unchanged. With
+    ``structure=None`` nothing is added and the result is byte-identical to
+    Phase 2C. This is the single point where broad structure enters the
+    planner's timing; ``decide_action`` / ``decide_gesture_kind`` /
+    ``gesture_side_for`` / ``planned_strength`` do not read it.
     """
     probability = ACTIVATION_BASE[context.energy_band]
     if context.trend > TREND_RISING:
         probability += ACTIVATION_TREND_BOOST
+    if context.structure is not None:
+        if context.structure.regime == "build":
+            probability += STRUCTURE_BUILD_BOOST
+        elif context.structure.regime == "release":
+            probability -= STRUCTURE_RELEASE_DAMP
     return min(probability, 1.0)
 
 
