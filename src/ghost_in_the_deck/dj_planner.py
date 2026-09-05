@@ -1,26 +1,26 @@
 """The DJ action planner: a deterministic decision layer between musical
-analysis and audio effects.
+analysis and the audio + animation it drives.
 
 Phase 1C wired ``hand_to_deck``'s filter sweep and Phase 1D wired
 ``small_hype``'s gain riser each directly to one gesture's own ``kind`` - an
 audio effect existed *because* that gesture kind was scheduled, not because
-the music justified it. This module inverts that one boundary:
+the music justified it. This module inverts that boundary:
 
     analysis -> musical context -> DJ decision (here) -> real audio action
+                                                      -> matching gesture kind
 
-so "does an audio effect happen right now, and which one" is answered from the
-music's own energy at that moment, independently of the gesture the avatar
-happens to be performing there.
+so "what happens right now" is answered from the music's own energy at that
+moment. ``decide_action`` (Phase 2A) answers it for audio; ``decide_gesture_kind``
+answers it for the visible gesture, from the *same* ``MusicalContext``, so the
+two are two readings of one decision rather than two independent rolls.
 
 What this phase deliberately does not do:
 
 - It adds no new DSP effect. ``AUDIO_ACTIONS`` is exactly the two effects that
   already exist in ``audio/effects.py`` plus doing nothing.
-- It does not rewrite ``DJBehaviorEngine``'s gesture-kind selection. The
-  visible gesture at a scheduled moment is still whatever that weighted-random
-  roll picked; only the *audio* decision at that same moment is now
-  independent of it. Full inversion (the planner choosing the moment and the
-  gesture to match) is Phase 2B.
+- It does not yet rewire ``DJBehaviorEngine._build_schedule`` to consume
+  ``decide_gesture_kind`` - that engine change is the next subtask. This file
+  only makes the decision available and deterministic.
 - It does not yet choose its own timing. A ``GestureEvent`` handed to
   ``DJActionPlanner.plan`` is a source of *timing only* - ``.start`` and
   ``.duration`` are read from it and nothing else. The action type, its
@@ -41,6 +41,7 @@ from typing import Sequence
 from .animation.dj_behavior import (
     HIGH_ENERGY,
     LOW_ENERGY,
+    TREND_RISING,
     GestureEvent,
     trend_at,
 )
@@ -66,6 +67,13 @@ PLANNER_STRENGTH_FLOOR = 0.5
 # only the absence of those two existing sounds - it is not a placeholder for
 # some future ``lean_in`` / ``deck_glance`` effect.
 AUDIO_ACTIONS = ("filter_sweep", "gain_riser", "none")
+
+# The gesture kinds that carry a side - an arm to reach or raise with. Mirrors
+# ``dj_behavior``'s own ``if kind in ("hand_to_deck", "small_hype")`` side draw,
+# but the planner assigns the side unconditionally from its own seed and the
+# moment, never from a candidate event. ``deck_glance`` / ``lean_in`` are
+# centred and keep ``side=None``.
+SIDED_GESTURE_KINDS = ("hand_to_deck", "small_hype")
 
 # Salt for this planner's own side draw. Deliberately distinct from every
 # channel ``dj_behavior._unit`` uses (activation, kind, jitter, side, gap) so
@@ -153,17 +161,57 @@ def decide_action(context: MusicalContext) -> str:
       and pulling a filter down further on already-quiet material has little
       to say.
 
-    ``context.trend`` is computed and exposed on ``MusicalContext`` for
-    observability and future phases but is **not yet** load-bearing here: none
-    of the two existing DSP effects represents anticipation/build, so there is
-    nothing for a "rising" reading to select. A later phase that adds such an
-    effect would fold ``trend`` in at this point.
+    ``context.trend`` is not read here: neither of the two existing DSP effects
+    represents anticipation/build, so there is nothing for a "rising" reading to
+    select on the audio side. Its visual sibling ``decide_gesture_kind`` *does*
+    read it (``lean_in`` is exactly an anticipation gesture); a later phase that
+    adds a build-style DSP effect would fold ``trend`` in at this point too.
     """
     if context.energy_band == "high":
         return "gain_riser"
     if context.energy_band == "mid":
         return "filter_sweep"
     return "none"
+
+
+def decide_gesture_kind(context: MusicalContext) -> str:
+    """Which gesture kind represents the same decision, right now.
+
+    The visual sibling of ``decide_action``: pure and deterministic, reads only
+    ``context`` - never a candidate ``GestureEvent``'s own ``kind``. Same band
+    split ``decide_action`` uses, mapped to the gesture whose existing musical
+    role matches:
+
+    - ``"high"`` energy -> ``"small_hype"``: an energy peak, the same moment
+      ``decide_action`` plans a ``gain_riser`` for.
+    - ``"mid"`` energy -> ``"hand_to_deck"``: an ordinary passage, "working a
+      control", the visual partner of the ``filter_sweep``.
+    - ``"low"`` energy -> ``"lean_in"`` when ``context.trend`` rises past
+      ``TREND_RISING`` (leaning in to catch a build), otherwise ``"deck_glance"``
+      (a restrained check). This is ``trend``'s first genuinely load-bearing use
+      in the planner - the same ``trend > TREND_RISING`` test
+      ``DJBehaviorEngine._kind_weights`` already uses to favour ``lean_in``.
+    """
+    if context.energy_band == "high":
+        return "small_hype"
+    if context.energy_band == "mid":
+        return "hand_to_deck"
+    if context.trend > TREND_RISING:
+        return "lean_in"
+    return "deck_glance"
+
+
+def planned_strength(context: MusicalContext) -> float:
+    """The strength every planned action shares - audio or gesture-only alike.
+
+    One formula: floored at ``PLANNER_STRENGTH_FLOOR`` and rising to 1.0 with
+    the music's energy, so a ``filter_sweep`` and the ``hand_to_deck`` that
+    represents the same decision are planned at one intensity rather than two.
+    """
+    return (
+        PLANNER_STRENGTH_FLOOR
+        + (1.0 - PLANNER_STRENGTH_FLOOR) * context.energy
+    )
 
 
 @dataclass(frozen=True)
@@ -197,13 +245,26 @@ class DJActionPlanner:
         self.seed = seed
 
     def _side_for(self, start: float) -> str:
-        """Deterministic ``"l"`` / ``"r"`` for a filter sweep at ``start``.
+        """Deterministic ``"l"`` / ``"r"`` for a planned action at ``start``.
 
         Derived unconditionally from the planner's seed and the moment alone -
         the candidate event's own ``side`` is never consulted, so the result is
-        identical whether that event carried ``"l"``, ``"r"`` or ``None``.
+        identical whether that event carried ``"l"``, ``"r"`` or ``None``. Used
+        for both the filter-sweep side and the sided-gesture side, so audio and
+        animation at one moment agree.
         """
         return "l" if _unit(self.seed, start, _SIDE_SALT) < 0.5 else "r"
+
+    def gesture_side_for(self, kind: str, start: float) -> str | None:
+        """The side a planned gesture ``kind`` carries at ``start``, or ``None``.
+
+        ``hand_to_deck`` / ``small_hype`` get the same seed-and-moment draw the
+        filter sweep uses; ``deck_glance`` / ``lean_in`` are centred and keep
+        ``None``. The candidate event's own ``side`` is never consulted.
+        """
+        if kind not in SIDED_GESTURE_KINDS:
+            return None
+        return self._side_for(start)
 
     def plan(
         self,
@@ -224,10 +285,7 @@ class DJActionPlanner:
             if action == "none":
                 continue
             side = self._side_for(event.start) if action == "filter_sweep" else None
-            strength = (
-                PLANNER_STRENGTH_FLOOR
-                + (1.0 - PLANNER_STRENGTH_FLOOR) * context.energy
-            )
+            strength = planned_strength(context)
             planned.append(
                 PlannedAudioAction(
                     start=event.start,
