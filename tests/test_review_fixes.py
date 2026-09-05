@@ -18,6 +18,12 @@ F5  the effect cache key carried no effect/schema version, so a render
 Phase 1C correction round 3 (hand_to_deck audio effect):
 F8  processed playback unconditionally re-encoded to PCM_16, silently
     saturating valid FLOAT-format source samples above +-1
+
+Phase 1D (small_hype gain riser):
+the fx cache key only ever folded in hand_to_deck events, so a track whose
+schedule carries only small_hype events was never rendered, and a schedule
+change limited to small_hype events (with hand_to_deck events unchanged)
+could not invalidate a previous render.
 """
 
 from __future__ import annotations
@@ -385,6 +391,76 @@ class TestHandToDeckEffectWiring(unittest.TestCase):
                 float(np.max(np.abs(processed))), 1.05,
                 "full-scale FLOAT samples were saturated by a PCM_16 write",
             )
+
+
+class TestSmallHypeEffectWiring(unittest.TestCase):
+    """Phase 1D: the fx cache must react to small_hype events too."""
+
+    def test_a_schedule_with_only_small_hype_events_is_actually_rendered(self):
+        """A track with small_hype events but no hand_to_deck events used to
+        fall through the (hand_to_deck-only) events_key check and be served
+        unprocessed. It must now be rendered like any other non-empty
+        schedule."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        events = [GestureEvent(0.1, 0.2, "small_hype", "l", 0.9)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, 44100, 0.5)
+
+            result = processed_audio_path(wav, _FakeBehavior(events=events))
+
+            self.assertNotEqual(result, wav)
+            self.assertTrue(result.is_file())
+
+    def test_changing_only_the_small_hype_schedule_changes_the_cache_key(self):
+        """Two schedules that agree on every hand_to_deck event but differ in
+        their small_hype events must not share a cache entry."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        htd_event = GestureEvent(0.4, 0.2, "hand_to_deck", "l", 0.9)
+        events_a = [htd_event, GestureEvent(1.0, 0.2, "small_hype", "l", 0.9)]
+        events_b = [htd_event, GestureEvent(1.0, 0.2, "small_hype", "l", 0.5)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, int(44100 * 2.0), 0.3)
+
+            target_a = processed_audio_path(wav, _FakeBehavior(events=events_a))
+            target_b = processed_audio_path(wav, _FakeBehavior(events=events_b))
+
+            self.assertNotEqual(
+                target_a, target_b,
+                "a small_hype-only schedule change reused the previous cache entry",
+            )
+            self.assertNotEqual(target_a.read_bytes(), target_b.read_bytes())
+
+    def test_small_hype_side_is_not_folded_into_the_cache_key(self):
+        """The riser ignores side, so two schedules differing only in a
+        small_hype event's side must render identically and share a cache
+        entry - folding in a field the effect does not use would just cause
+        needless re-renders."""
+        import tempfile
+
+        from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+
+        events_l = [GestureEvent(0.4, 0.2, "small_hype", "l", 0.9)]
+        events_r = [GestureEvent(0.4, 0.2, "small_hype", "r", 0.9)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "track.wav"
+            _write_wav(wav, int(44100 * 1.0), 0.3)
+
+            target_l = processed_audio_path(wav, _FakeBehavior(events=events_l))
+            target_r = processed_audio_path(wav, _FakeBehavior(events=events_r))
+
+            self.assertEqual(target_l, target_r)
+            self.assertEqual(target_l.read_bytes(), target_r.read_bytes())
 
 
 if __name__ == "__main__":
