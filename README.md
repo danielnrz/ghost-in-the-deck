@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 2A**.
+This repository is currently at **Phase 2B**.
 
 ## Phase 0 scope
 
@@ -451,9 +451,9 @@ same way `hand_to_deck` audibly reshapes it.
 `small_hype` was picked because the groundwork already existed: it already
 carries a `side` and a `strength` (the schedule reuses the same channel of
 per-bar draws as `hand_to_deck` for `side`, even though the riser itself does
-not use it), and its selection weights in `dj_behavior._kind_weights` are
-already energy-driven - strongly favoured at high energy, suppressed at low
-energy - so it already represents a distinct musical moment (an energy peak)
+not use it), and the gesture scheduler's own kind weighting was already
+energy-driven - `small_hype` strongly favoured at high energy, suppressed at
+low energy - so it already represents a distinct musical moment (an energy peak)
 from `hand_to_deck`'s "working a control" moment. That argued for a distinct
 *kind* of effect: an amplitude riser, not a second filter sweep.
 
@@ -501,14 +501,14 @@ animation subsystems and belongs to neither) is a small, deterministic,
 Panda3D-free module. `context_at` reads the track's smoothed energy and a
 short trend at one absolute time - the *same* `EnergyTrack` and the *same*
 promoted `trend_at` the gesture scheduler uses, and the *same* imported
-`LOW_ENERGY` / `HIGH_ENERGY` band edges `DJBehaviorEngine._kind_weights`
-already reasons about, not restated copies. `decide_action` then picks from
+`LOW_ENERGY` / `HIGH_ENERGY` band edges the gesture scheduler already reasons
+about, not restated copies. `decide_action` then picks from
 exactly three outcomes: high energy -> the gain riser (an energy peak,
 `small_hype`'s existing role); mid energy -> the filter sweep
 (`hand_to_deck`'s "working a control" role); low energy -> nothing. `trend` is
-computed and carried for observability and later phases but is not yet
-load-bearing in the decision - none of the two existing effects represents a
-build.
+computed and carried but is not load-bearing in this *audio* decision - none of
+the two existing effects represents a build. (Its visual sibling
+`decide_gesture_kind`, added in Phase 2B below, does read it.)
 
 **No new DSP effect was added.** `audio/effects.py` is byte-for-byte what
 Phase 1D left it. The two functions there are reused exactly; `AUDIO_ACTIONS`
@@ -524,14 +524,57 @@ the moment alone (salted apart from `dj_behavior`'s own per-bar side draw), so
 the choice is identical whether or not the candidate gesture happened to carry
 a side.
 
-What this phase does **not** do: it does not touch `DJBehaviorEngine`'s own
-gesture-kind selection. The *visible* gesture at a scheduled moment - which
-kind, when - is still exactly the pre-existing weighted-random roll, and is
-**not yet** driven by this planner. Unifying the two so the planner picks the
-moment and action first and the gesture is chosen to match is the deferred
-next step (Phase 2B). There is still no section, build or drop detection -
-only an energy band and a short trend - and still no two-track mixing, EQ,
-crossfader or live parameter control.
+What this phase does **not** do: it does not yet touch `DJBehaviorEngine`'s
+own gesture-kind selection. At Phase 2A the *visible* gesture at a scheduled
+moment - which kind - is still the pre-existing weighted-random roll,
+decided independently of this planner. Phase 2B (below) removes that roll and
+has the same planner decide the gesture kind, side and strength too. Neither
+phase adds section, build or drop detection - only an energy band and a short
+trend - or any two-track mixing, EQ, crossfader or live parameter control.
+
+## The gesture is the decision too (Phase 2B)
+
+Phase 2A inverted only the audio half: at an already-scheduled moment,
+`dj_planner.decide_action` chose the audio action from musical context, while
+`DJBehaviorEngine._build_schedule` still rolled the gesture kind, side and
+strength from its own independent weighted-random draw. Phase 2B removes that
+draw entirely.
+
+`dj_planner` gains a second deterministic decision, `decide_gesture_kind` - the
+visual sibling of `decide_action`, reading the *same* `MusicalContext` and the
+same imported `LOW_ENERGY` / `HIGH_ENERGY` band edges, never a candidate
+event's own `kind`: high energy -> `small_hype` (the same peak
+`decide_action` plans a gain riser for), mid energy -> `hand_to_deck` (the
+visual partner of the filter sweep), low energy -> `lean_in` when the short
+trend is rising past `TREND_RISING`, else `deck_glance`. `planned_strength`
+(one shared formula, floored and rising with energy) and
+`DJActionPlanner.gesture_side_for` (the same seed-and-moment draw the filter
+sweep's side uses, `None` for the centred kinds) supply the other two fields.
+
+`DJBehaviorEngine._build_schedule` now calls those three at each hosted bar's
+own start time instead of the old `_kind_weights` / `_choose_kind` roll (both
+methods now deleted). The visible gesture and the audio action `dj_planner` plans for
+that same moment are now two readings of one decision rather than two
+independent rolls. This also makes the short trend genuinely load-bearing in
+the planner for the first time - `decide_gesture_kind` is where a rising trend
+actually selects `lean_in`.
+
+What Phase 2B still does **not** do:
+
+- **No real musical-structure awareness.** The decision is still an energy
+  band plus "energy now minus energy a few seconds ago". There is no build,
+  drop, breakdown, section or phrase detection.
+- **No planner-owned timing.** Whether a bar hosts a gesture at all, and how
+  far apart gestures fall, is still `DJBehaviorEngine`'s own
+  activation/gap roll. The planner decides *what* an event is, not *when* one
+  happens; planner-owned timing is a later phase.
+- **No new audio.** `audio/effects.py` is unchanged. `deck_glance` and
+  `lean_in` still carry no audio effect - by design, since neither the filter
+  sweep nor the gain riser represents "glancing" or "leaning in".
+- **Gesture poses are unchanged.** `gesture_pose.py`, `arm_ik.py` and the rig
+  are byte-for-byte as Phase 1B.2 left them. Only *which* kind gets chosen at a
+  moment changed, not how any kind looks.
+- Still no two-track mixing, EQ, crossfader or live parameter control.
 
 ## Tests
 
@@ -554,11 +597,18 @@ sweep including a near-full-scale case, and a combined schedule proving
 neither effect corrupts the other's window), the DJ action planner
 (`context_at` agreeing with `DJBehaviorEngine`'s own energy/trend maths, an
 audio decision being identical for two events that share only start/duration,
-band edges matching the imported constants, and a deterministic sweep side),
-the planner wiring in `app.processed_audio_path` (an all-`deck_glance`
-schedule still rendering, an all-`hand_to_deck` schedule in the low-energy
-band rendering nothing, and `PLANNER_VERSION` invalidating the cache), and a
-pixel comparison of rendered frames proving the movement is actually visible.
+band edges matching the imported constants, a deterministic sweep side, and
+`decide_gesture_kind` mapping each energy band - and a rising trend in the low
+band - to the expected kind), the planner-driven schedule
+(every built event's `kind`, `side` and `strength` equal exactly
+`decide_gesture_kind` / `gesture_side_for` / `planned_strength` at that event's
+start across several energy profiles, a low-band moment never scheduling
+`small_hype`, a high-band one always doing so, and the `ACTIONS` / `GestureEvent`
+shape unchanged), the planner wiring in `app.processed_audio_path` (an
+all-`deck_glance` schedule still rendering, an all-`hand_to_deck` schedule in
+the low-energy band rendering nothing, and `PLANNER_VERSION` invalidating the
+cache), and a pixel comparison of rendered frames proving the movement is
+actually visible.
 
 `test_timing.py` is the render-stall suite for the groove. It drives the real
 timeline and animator through 60/30/15/5 fps schedules and through 250 ms,
@@ -609,9 +659,12 @@ Two format notes, both learned the hard way:
   a filter sweep (low-pass / high-pass) and a gain riser, each offline and
   deterministic, each running over an attack-hold-release envelope. As of
   Phase 2A which of them plays at a scheduled moment - or neither - is chosen
-  by `dj_planner.py` from the music's energy band there, not from the gesture
-  kind the avatar performs, so the sweep and riser are no longer welded to
-  `hand_to_deck` / `small_hype` respectively. There is no knob contact beyond
+  by `dj_planner.py` from the music's energy band there; as of Phase 2B the
+  gesture kind at that moment is chosen by the same planner from the same
+  context. Effect and gesture realign in the common case, but as two readings
+  of one decision, not because Phase 1C/1D's `hand_to_deck` -> sweep /
+  `small_hype` -> riser welding still holds - the planner reads neither
+  gesture's `kind`. There is no knob contact beyond
   those two effects, no fader movement, no EQ bands, no crossfading, and no
   live parameter control - everything is precomputed once per track from the
   fixed schedule, not solved or adjusted at runtime.
@@ -633,17 +686,19 @@ Two format notes, both learned the hard way:
   assuming the same values still clear. The sweep is a *measurement* of the
   existing skinned mesh, offline and in tests; there is no runtime collision
   solver or runtime finger IK, by design.
-- Gesture selection reasons about relative energy and a short trend, not real
-  musical structure. It has no idea what a build-up, a drop or a breakdown is.
-- Gesture selection and audio-action selection are now two independent
-  deterministic decisions (Phase 2A), not yet unified into one planner. The
-  audio decision is made from the music's energy band at a scheduled moment,
-  the visible gesture from the older weighted-random roll. A consequence: a
-  moment labelled `lean_in` or `deck_glance` can now also produce a filter
-  sweep or a gain riser, and a moment labelled `hand_to_deck` or `small_hype`
-  can now produce silence, because which effect plays no longer depends on the
-  gesture's kind. That is the intended behaviour of this phase, not a
-  regression; Phase 2B is where the two decisions become one.
+- Gesture and audio-action selection reason about relative energy and a short
+  trend, not real musical structure - no idea what a build-up, a drop or a
+  breakdown is. As of Phase 2B the trend is load-bearing: a rising one in the
+  low-energy band picks `lean_in` over `deck_glance` (and would fold into the
+  audio decision too once an effect represents a build). But it is still only
+  "energy now minus energy a few seconds ago", not structural awareness.
+- Gesture kind, side and strength and the audio action at a scheduled moment
+  are one planner decision (Phase 2B), read from the same musical context - the
+  old independent weighted-random kind roll is gone. What is *not* unified is
+  event timing: whether a bar hosts a gesture at all, and how far apart
+  gestures fall, is still `DJBehaviorEngine`'s own activation/gap roll,
+  untouched by the planner. The planner decides what an event is, not when one
+  happens; planner-owned timing is a later phase.
 - Bars are assumed to be four beats. A track in another metre still grooves,
   and gestures still land on a bar boundary, but the wrong one.
 - Before the first detected beat and after the last, the beat grid is

@@ -34,6 +34,16 @@ the music justifies one) nor sufficient for one (an all-hand_to_deck schedule
 in the low-energy band renders nothing), and that the fx cache key folds in
 the planner's decision-rule version and the planned actions, not the raw
 gesture fields.
+
+These tests hand ``processed_audio_path`` a synthetic list of ``GestureEvent``s
+directly, so ``DJActionPlanner.plan`` runs on exactly those events and
+``DJBehaviorEngine._build_schedule`` is never involved. That deliberately keeps
+them exercising only the *audio* decision boundary: Phase 2B has the same
+planner also pick each scheduled event's kind/side/strength (so a real schedule
+would now agree with the audio plan by construction), but that is
+``test_dj_behavior.py``'s subject, and hand-built ``kind``/``side`` values here
+still let the audio-side "reads none of those fields" contract be checked in
+isolation.
 """
 
 from __future__ import annotations
