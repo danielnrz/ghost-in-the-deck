@@ -5,9 +5,8 @@ and is kept deliberately separate from the single-track decision layer: it never
 imports ``dj_planner`` or ``dj_behavior``. It is Panda3D-free.
 
 ``TwoDeckContext`` pairs two ``TrackDeck`` objects and exposes only raw,
-deterministic measurements derived live from the two decks - no boolean
-"these tracks are compatible" verdict, no key or harmonic guessing, no
-section detection.
+deterministic measurements derived live from the two decks - no fit or
+matching verdict about the pair, no pitch guessing, no section detection.
 
 ``TransitionPlan`` is a frozen data object recording one already-chosen pair of
 cue points plus the measured quantities around it. Building one does no audio
@@ -23,7 +22,10 @@ from .animation.structure import MusicalStructure
 from .deck import TrackDeck
 
 # A candidate cue point must sit at least this far from either edge of the
-# track, so a transition built on it has room to breathe on both decks.
+# track, so a transition built on it has room to breathe on both decks. At the
+# tail this is only a floor: ``candidate_cue_points`` reserves the larger of
+# this margin and the planned transition span, so the whole transition still
+# fits on the deck after the cue even on a slow or short track.
 EDGE_MARGIN_SECONDS = 16.0
 
 # Upper bound on how many cue points one deck contributes to planning.
@@ -98,20 +100,29 @@ def candidate_cue_points(
     *,
     margin_seconds: float = EDGE_MARGIN_SECONDS,
     limit: int = MAX_CANDIDATES_PER_DECK,
+    transition_bars: int = DEFAULT_TRANSITION_LENGTH_BARS,
 ) -> list[CuePoint]:
     """The most stable whole-bar cue points on ``deck``, best first.
 
     Walks the bar grid via ``timeline.beat_time(bar * BEATS_PER_BAR)``, skips any
-    bar within ``margin_seconds`` of the start or of ``deck.duration``, scores
-    each remaining bar as ``1.0 - structure.section_change_likelihood``, and
-    returns the top ``limit`` by score. Ties break by earliest ``bar_index``.
-    Fully deterministic: no hashing, no randomness.
+    bar within ``margin_seconds`` of the start, skips any bar that does not leave
+    room after it for a ``transition_bars``-bar transition at this deck's bar
+    length (or ``margin_seconds``, whichever is larger), scores each remaining
+    bar as ``1.0 - structure.section_change_likelihood``, and returns the top
+    ``limit`` by score. Ties break by earliest ``bar_index``. Fully
+    deterministic: no hashing, no randomness. Returns ``[]`` when the two edge
+    constraints leave no whole bar in between - a slow or short track simply has
+    nowhere a full transition fits.
     """
     timeline = deck.timeline
     duration = deck.duration
-    latest = duration - margin_seconds
 
     bar_seconds = timeline.nominal_interval * BEATS_PER_BAR
+    # The tail must hold the whole planned transition, not just the edge margin:
+    # on a slow track ``transition_bars`` bars is much longer than the margin.
+    tail_room = max(margin_seconds, transition_bars * bar_seconds)
+    latest = duration - tail_room
+
     max_bars = int(duration / bar_seconds) + 2 if bar_seconds > 0 else 0
 
     candidates: list[CuePoint] = []
@@ -161,6 +172,8 @@ class TransitionPlan:
         incoming: CuePoint,
         score: float,
         reason: str,
+        *,
+        transition_bars: int = DEFAULT_TRANSITION_LENGTH_BARS,
     ) -> "TransitionPlan":
         """Assemble a plan from an already-picked pair of cue points.
 
@@ -168,8 +181,8 @@ class TransitionPlan:
         out); ``incoming`` is a cue point on ``context.deck_b`` (the track being
         mixed in). ``score`` and ``reason`` are supplied by the caller that chose
         this pair - this constructor neither generates candidates nor ranks
-        them. ``expected_duration_bars`` is fixed at
-        ``DEFAULT_TRANSITION_LENGTH_BARS`` and converted to seconds at
+        them. ``expected_duration_bars`` is ``transition_bars`` (default
+        ``DEFAULT_TRANSITION_LENGTH_BARS``) and converted to seconds at
         ``deck_a``'s bar length.
         """
         return cls(
@@ -182,10 +195,8 @@ class TransitionPlan:
             bpm_a=context.deck_a.bpm,
             bpm_b=context.deck_b.bpm,
             bpm_ratio=context.bpm_ratio,
-            expected_duration_bars=DEFAULT_TRANSITION_LENGTH_BARS,
-            expected_duration_seconds=(
-                DEFAULT_TRANSITION_LENGTH_BARS * context.bar_seconds_a
-            ),
+            expected_duration_bars=transition_bars,
+            expected_duration_seconds=transition_bars * context.bar_seconds_a,
             score=score,
             reason=reason,
         )
@@ -227,25 +238,34 @@ def plan_transition(
     *,
     margin_seconds: float = EDGE_MARGIN_SECONDS,
     limit_per_deck: int = MAX_CANDIDATES_PER_DECK,
+    transition_bars: int = DEFAULT_TRANSITION_LENGTH_BARS,
 ) -> "TransitionPlan | None":
     """Pick the single best outgoing/incoming cue pair for ``context``.
 
     Generates ``candidate_cue_points`` for ``context.deck_a`` (outgoing) and
-    ``context.deck_b`` (incoming), scores every ``(outgoing, incoming)`` pair as
-    ``_combined_score`` of the outgoing cue's score, the incoming cue's score and
-    ``tempo_closeness(context.bpm_ratio)``, and returns the top pair as a
-    ``TransitionPlan``. Ties break deterministically: earliest ``outgoing.time``,
-    then earliest ``incoming.time``.
+    ``context.deck_b`` (incoming) - each already requiring room after the cue for
+    the full ``transition_bars``-bar span - scores every ``(outgoing, incoming)``
+    pair as ``_combined_score`` of the outgoing cue's score, the incoming cue's
+    score and ``tempo_closeness(context.bpm_ratio)``, and returns the top pair as
+    a ``TransitionPlan``. Ties break deterministically: earliest
+    ``outgoing.time``, then earliest ``incoming.time``.
 
-    Returns ``None`` when either deck yields zero candidates - it never
-    fabricates a cue point to force a plan. Fully deterministic: the same two
-    ``TrackDeck`` objects give a byte-identical result every call.
+    Returns ``None`` when either deck yields zero candidates - including when a
+    deck is too slow or too short for a full transition to fit after any cue. It
+    never fabricates a cue point to force a plan. Fully deterministic: the same
+    two ``TrackDeck`` objects give a byte-identical result every call.
     """
     outgoing_candidates = candidate_cue_points(
-        context.deck_a, margin_seconds=margin_seconds, limit=limit_per_deck
+        context.deck_a,
+        margin_seconds=margin_seconds,
+        limit=limit_per_deck,
+        transition_bars=transition_bars,
     )
     incoming_candidates = candidate_cue_points(
-        context.deck_b, margin_seconds=margin_seconds, limit=limit_per_deck
+        context.deck_b,
+        margin_seconds=margin_seconds,
+        limit=limit_per_deck,
+        transition_bars=transition_bars,
     )
     if not outgoing_candidates or not incoming_candidates:
         return None
@@ -270,4 +290,6 @@ def plan_transition(
         f"tempo {tempo_score:.4f} from bpm_ratio {context.bpm_ratio:.4f}) "
         f"weights {PAIR_SCORE_WEIGHTS}"
     )
-    return TransitionPlan.from_selection(context, outgoing, incoming, score, reason)
+    return TransitionPlan.from_selection(
+        context, outgoing, incoming, score, reason, transition_bars=transition_bars
+    )

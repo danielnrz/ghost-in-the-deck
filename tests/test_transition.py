@@ -193,6 +193,27 @@ class CandidateCuePoints(unittest.TestCase):
         )
         self.assertEqual(candidate_cue_points(short), [])
 
+    def test_every_candidate_leaves_room_for_a_full_transition(self):
+        # A slow deck: 8 bars at bpm=60 is 32 s, far longer than the 16 s edge
+        # margin. Every candidate must still leave that whole span after it.
+        slow = TrackDeck.from_features(
+            _features("slow", bpm=60.0, duration=140.0, energy=_ramp_then_plateau)
+        )
+        bar_seconds = slow.timeline.nominal_interval * BEATS_PER_BAR
+        span = DEFAULT_TRANSITION_LENGTH_BARS * bar_seconds
+        cues = candidate_cue_points(slow)
+        self.assertGreater(len(cues), 0)
+        for cue in cues:
+            self.assertLessEqual(cue.time + span, slow.duration)
+
+    def test_slow_short_deck_yields_no_candidates(self):
+        # bpm=60, 40 s: an 8-bar (32 s) transition plus the 16 s lead-in does
+        # not fit anywhere, so there is no honest cue to offer.
+        slow_short = TrackDeck.from_features(
+            _features("slow-short", bpm=60.0, duration=40.0, energy=_ramp_then_plateau)
+        )
+        self.assertEqual(candidate_cue_points(slow_short), [])
+
 
 class TempoCloseness(unittest.TestCase):
     def test_exact_match_scores_one_and_is_direction_sensitive(self):
@@ -319,6 +340,43 @@ class PlanTransition(unittest.TestCase):
         full = _deck_a()
         self.assertIsNone(plan_transition(TwoDeckContext(short, full)))
         self.assertIsNone(plan_transition(TwoDeckContext(full, short)))
+
+    def test_planned_span_fits_on_both_decks(self):
+        # The advertised transition span, taken from each cue, must end on or
+        # before the end of the deck it runs on - never past it.
+        pairs = [
+            (_deck_a(), _deck_b()),
+            (
+                TrackDeck.from_features(
+                    _features("slow-a", bpm=64.0, duration=150.0, energy=_ramp_then_plateau)
+                ),
+                TrackDeck.from_features(
+                    _features("slow-b", bpm=68.0, duration=150.0, energy=_plateau_then_fall)
+                ),
+            ),
+        ]
+        for a, b in pairs:
+            ctx = TwoDeckContext(a, b)
+            plan = plan_transition(ctx)
+            self.assertIsNotNone(plan)
+            self.assertLessEqual(
+                plan.outgoing_time + plan.expected_duration_seconds, a.duration
+            )
+            self.assertLessEqual(
+                plan.incoming_time
+                + plan.expected_duration_bars * ctx.bar_seconds_b,
+                b.duration,
+            )
+
+    def test_slow_short_track_plans_nothing_instead_of_overrunning(self):
+        # Regression: bpm=60 / 40 s once returned a plan whose 32 s span ran to
+        # 48.5 s, well past the 40 s track. It must now decline instead.
+        slow_short = _features(
+            "slow-short", bpm=60.0, duration=40.0, energy=_ramp_then_plateau
+        )
+        deck = TrackDeck.from_features(slow_short)
+        self.assertIsNone(plan_transition(TwoDeckContext(deck, _deck_b())))
+        self.assertIsNone(plan_transition(TwoDeckContext(_deck_a(), deck)))
 
     def test_from_selection_does_not_rank_or_generate(self):
         a, b = _deck_a(), _deck_b()
