@@ -14,12 +14,19 @@ cursor, no dependence on which times were asked about before. A renderer stall
 simply skips part of a gesture and resumes at the progress the schedule says is
 current for wherever the clock has moved to.
 
-Selection is deterministic: a bar either hosts an event or does not, and which
-kind, which side and how strong it is are all decided by hashing the track's
-own seed with the bar number - the same primitive GrooveEngine's per-bar
-variation uses, but salted independently so an event's placement and its
-groove personality are two different, uncorrelated numbers, not two views of
-one hidden random source. Nothing here calls random().
+Selection is deterministic: whether a bar hosts an event, and roughly how far
+apart events fall, are decided by hashing the track's own seed with the bar
+number - the same primitive GrooveEngine's per-bar variation uses, but salted
+independently so an event's placement and its groove personality are two
+different, uncorrelated numbers, not two views of one hidden random source.
+Nothing here calls random().
+
+What an event *is* - its kind, its side, its strength - is not rolled here at
+all. Those come from ``dj_planner``'s deterministic decision functions
+(``decide_gesture_kind`` / ``DJActionPlanner.gesture_side_for`` /
+``planned_strength``) evaluated at the bar's own start time, so the visible
+gesture and the audio action ``dj_planner`` plans for that same moment are two
+readings of one decision rather than two independent weighted rolls.
 
 Nothing here imports Panda3D.
 """
@@ -128,10 +135,10 @@ _SEED_SALT = "dj-behavior"
 def trend_at(energy: EnergyTrack, time: float) -> float:
     """Energy now minus energy ``TREND_LOOKBACK`` seconds ago, clamped at t=0.
 
-    Module-level so the gesture scheduler here and the audio-action planner in
-    ``dj_planner.py`` reason about "rising" from one shared definition rather
-    than two copies that could drift apart. ``DJBehaviorEngine._trend`` is a
-    thin bound wrapper over this; nothing else about scheduling changed.
+    Module-level so ``dj_planner`` (whose ``decide_gesture_kind`` picks
+    ``lean_in`` on a rising trend) and ``DJBehaviorEngine._trend`` reason about
+    "rising" from one shared definition rather than two copies that could drift
+    apart.
     """
     earlier = max(0.0, time - TREND_LOOKBACK)
     return energy.at(time) - energy.at(earlier)
@@ -222,47 +229,28 @@ class DJBehaviorEngine:
         """Energy now minus energy a few seconds ago, clamped to the track."""
         return trend_at(self.energy, time)
 
-    def _kind_weights(self, time: float) -> dict[str, float]:
-        """How much each action kind fits the music right now."""
-        energy = self.energy.at(time)
-        trend = self._trend(time)
-
-        weights = {
-            "deck_glance": 1.0,
-            "lean_in": 0.7,
-            "hand_to_deck": 0.9,
-            "small_hype": 0.15,
-        }
-
-        if energy < LOW_ENERGY:
-            weights["deck_glance"] *= 1.6
-            weights["hand_to_deck"] *= 1.2
-            weights["small_hype"] *= 0.2
-        elif energy >= HIGH_ENERGY:
-            weights["deck_glance"] *= 0.6
-            weights["hand_to_deck"] *= 0.7
-            weights["small_hype"] *= 3.0
-            weights["lean_in"] *= 1.1
-
-        if trend > TREND_RISING:
-            weights["lean_in"] *= 1.8
-
-        return weights
-
-    def _choose_kind(self, bar: int, weights: dict[str, float]) -> str:
-        total = sum(weights.values())
-        roll = _unit(self.seed, bar, 1) * total
-        cumulative = 0.0
-        for kind in ACTIONS:      # fixed order, so the mapping is deterministic
-            cumulative += weights[kind]
-            if roll < cumulative:
-                return kind
-        return ACTIONS[-1]
-
     def _build_schedule(self) -> list[GestureEvent]:
+        # Local import, matching app.processed_audio_path's own precedent for
+        # this exact dj_planner<->dj_behavior shape: dj_planner imports names
+        # from this module at its top level, so importing it here (at call
+        # time, when this module is already fully loaded) keeps the decision
+        # logic one-way - dj_planner is the single source, nothing is
+        # duplicated back into this file.
+        from ..dj_planner import (
+            DJActionPlanner,
+            context_at,
+            decide_gesture_kind,
+            planned_strength,
+        )
+
         duration = self.features.duration_seconds
         nominal = self.timeline.nominal_interval
         bar_seconds = max(nominal * BEATS_PER_BAR, 1e-3)
+
+        # Same per-track seed the audio side uses (app.py passes behavior.seed),
+        # so a gesture's side and the filter-sweep side dj_planner plans for the
+        # same moment are drawn from one number, not two.
+        planner = DJActionPlanner(self.seed)
 
         events: list[GestureEvent] = []
         bar = 0
@@ -279,8 +267,11 @@ class DJBehaviorEngine:
             if bar >= next_eligible_bar and start >= 1.0:
                 roll = _unit(self.seed, bar, 0)
                 if roll < ACTIVATION_PROBABILITY:
-                    weights = self._kind_weights(start)
-                    kind = self._choose_kind(bar, weights)
+                    # The bar is hosting an event; what that event *is* is the
+                    # planner's decision, read at this bar's own start time and
+                    # the track's energy there - not an independent kind roll.
+                    context = context_at(self.energy, start)
+                    kind = decide_gesture_kind(context)
 
                     jitter = 0.85 + 0.3 * _unit(self.seed, bar, 2)
                     event_duration = BASE_DURATION[kind] * jitter
@@ -288,17 +279,8 @@ class DJBehaviorEngine:
                         bar += 1
                         continue
 
-                    side = None
-                    if kind in ("hand_to_deck", "small_hype"):
-                        # Same channel for both: hand_to_deck reaches with this
-                        # arm, small_hype raises it. Each kind only ever reads
-                        # one of the two draws for a given bar, so this stays
-                        # independent of which kind actually got chosen.
-                        side_roll = _unit(self.seed, bar, 3)
-                        side = "l" if side_roll < 0.5 else "r"
-
-                    local_energy = self.energy.at(start)
-                    strength = 0.6 + 0.4 * local_energy
+                    side = planner.gesture_side_for(kind, start)
+                    strength = planned_strength(context)
 
                     events.append(GestureEvent(start, event_duration, kind, side, strength))
 
