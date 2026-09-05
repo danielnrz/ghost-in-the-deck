@@ -59,6 +59,11 @@ from .animation.dj_behavior import (
     trend_at,
 )
 from .animation.energy import EnergyTrack
+from .animation.structure import (
+    PHRASE_SMOOTHING_SECONDS,
+    MusicalStructure,
+    structure_at,
+)
 
 # This phase's own cache-invalidation version, analogous to
 # ``effects.EFFECT_VERSION`` / ``features.SCHEMA_VERSION``. Bump it whenever a
@@ -71,8 +76,8 @@ PLANNER_VERSION = 1
 
 # Floor for a planned action's ``strength``: a full-energy moment plans at
 # strength 1.0, a zero-energy one still plans at this value rather than 0.
-# A fixed, documented constant (like ``dj_behavior.BASE_DURATION``), analogous
-# in spirit to - but computed independently of, never read from -
+# A fixed, documented constant (like this module's own ``BASE_DURATION``),
+# analogous in spirit to - but computed independently of, never read from -
 # ``dj_behavior``'s own ``event.strength = 0.6 + 0.4 * local_energy``.
 PLANNER_STRENGTH_FLOOR = 0.5
 
@@ -180,12 +185,18 @@ class MusicalContext:
     """What the music is doing at one absolute playback time.
 
     ``at_bar_boundary`` is always ``True`` for every call site in this phase:
-    every decision is made at one of ``DJBehaviorEngine``'s own event starts,
+    every decision is made at one of the planner's own candidate bar starts,
     and those are bar-aligned by construction
-    (``_build_schedule`` sets ``start = timeline.beat_time(bar * BEATS_PER_BAR)``).
-    It is carried as a real field rather than left implicit because a future
-    phase that evaluates context off the bar grid (its own timing, Phase 2B+)
-    would need this to actually mean something.
+    (``plan_schedule`` sets ``start = timeline.beat_time(bar * BEATS_PER_BAR)``).
+    It is carried as a real field rather than left implicit so that any call
+    site which one day evaluates context off the bar grid stays honest about it.
+
+    ``structure`` is the broad musical-structure reading (regime, broad trend,
+    section-change likelihood) for this moment, or ``None``. Every direct
+    construction and ``DJActionPlanner.plan``'s audio-only path leave it
+    ``None``; only ``plan_schedule`` attaches a real one, from a broad
+    ``EnergyTrack`` it builds once per call. The ``structure=None`` path is
+    deliberately byte-identical to Phase 2C.
     """
 
     time: float
@@ -193,10 +204,18 @@ class MusicalContext:
     trend: float
     energy_band: str
     at_bar_boundary: bool
+    structure: MusicalStructure | None = None
 
 
-def context_at(energy: EnergyTrack, time: float) -> MusicalContext:
-    """The musical context at ``time`` - a pure function of the energy track."""
+def context_at(
+    energy: EnergyTrack, time: float, *, structure: MusicalStructure | None = None
+) -> MusicalContext:
+    """The musical context at ``time`` - a pure function of its inputs.
+
+    ``structure`` defaults to ``None`` so every two-argument caller is
+    unchanged; ``plan_schedule`` passes the broad-structure reading for the
+    moment so the kind / activation / strength decisions can see it.
+    """
     value = energy.at(time)
     return MusicalContext(
         time=time,
@@ -206,6 +225,7 @@ def context_at(energy: EnergyTrack, time: float) -> MusicalContext:
         # See MusicalContext's docstring: every call site is a bar-aligned
         # DJBehaviorEngine event start, so this is genuinely true, not a stub.
         at_bar_boundary=True,
+        structure=structure,
     )
 
 
@@ -303,9 +323,9 @@ class PlannedAudioAction:
     Its own type, not a reuse of ``GestureEvent``, so a reader can see this is
     an audio decision rather than a copy of the visual schedule. ``start`` and
     ``duration`` are the only fields carried over from the candidate
-    ``GestureEvent`` (this phase does not choose its own timing yet); ``action``,
-    ``side`` and ``strength`` are the planner's own decision and are never
-    sourced from that event's ``kind``, ``side`` or ``strength``.
+    ``GestureEvent`` handed to ``DJActionPlanner.plan``; ``action``, ``side``
+    and ``strength`` are the planner's own decision and are never sourced from
+    that event's ``kind``, ``side`` or ``strength``.
     """
 
     start: float
@@ -362,7 +382,10 @@ class DJActionPlanner:
         the kind / side / strength decisions already use:
 
         - candidate positions are the existing bar grid (``timeline.beat_time``
-          at whole-bar beat counts); no phrase/section detection is added;
+          at whole-bar beat counts); no phrase/section detection gates them;
+        - each bar's ``MusicalContext`` carries a broad ``MusicalStructure``
+          reading (``structure_at`` against a one-per-call broad
+          ``EnergyTrack``), so structure-aware decisions can read it;
         - a bar is eligible once its start reaches 1.0 s and once
           ``MIN_GAP_BARS`` (plus 0..2 bars of seed jitter) have passed since
           the last event started;
@@ -375,6 +398,14 @@ class DJActionPlanner:
         inputs give a byte-identical event list. Reuses ``decide_gesture_kind``
         / ``gesture_side_for`` / ``planned_strength`` exactly as they stand.
         """
+        # One broad EnergyTrack for the whole call: the same feature data the
+        # groove uses, re-smoothed over PHRASE_SMOOTHING_SECONDS so a whole
+        # build or release reads as one movement. structure_at then looks it up
+        # per bar without rebuilding it.
+        broad = EnergyTrack(
+            energy.features, smoothing_seconds=PHRASE_SMOOTHING_SECONDS
+        )
+
         nominal = timeline.nominal_interval
         bar_seconds = max(nominal * BEATS_PER_BAR, 1e-3)
         # A generous bound on how many bars a track this long could contain, so
@@ -390,7 +421,9 @@ class DJActionPlanner:
                 break
 
             if bar >= next_eligible_bar and start >= 1.0:
-                context = context_at(energy, start)
+                context = context_at(
+                    energy, start, structure=structure_at(broad, timeline, start)
+                )
                 if _bar_unit(self.seed, bar, 0) < activation_probability(context):
                     kind = decide_gesture_kind(context)
 
