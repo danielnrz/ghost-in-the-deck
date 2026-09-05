@@ -409,6 +409,72 @@ class TestGestureFrequency(unittest.TestCase):
         self.assertGreater(len(set(round(g, 1) for g in gaps)), 1, "every gap was identical")
 
 
+class TestEventRateFollowsEnergy(unittest.TestCase):
+    """Phase 2C: the planner owns the bar choice, and it makes that choice from
+    the same MusicalContext its kind/side/strength decisions use - so a
+    sustained-high-energy track ends up with a genuinely higher event rate than
+    a sustained-low-energy one built the very same way. This is the
+    musically-justified-timing property stated directly, not as a distribution.
+    """
+
+    RATE_DURATION = 300.0
+    RATE_BEATS = regular_beats(
+        bpm=BPM, count=int(RATE_DURATION / (60.0 / BPM)), offset=0.5
+    )
+
+    @staticmethod
+    def _mostly(level, other, period=37.0, spike=0.5):
+        """A track that sits at ``level`` almost all the time, with a brief
+        excursion to ``other`` every ``period`` seconds. The excursion is what
+        gives EnergyTrack's own-range normalisation something to scale against,
+        so ``level`` lands squarely in one band rather than washing out to mid.
+        """
+        return lambda t: other if (t % period) < spike else level
+
+    def _engine(self, energy):
+        return behavior_for(
+            self.RATE_BEATS,
+            duration=self.RATE_DURATION,
+            bpm=BPM,
+            seed="energy-rate",           # identical seed - only energy differs
+            energy=energy,
+        )
+
+    def test_sustained_high_energy_fires_more_often_than_sustained_low(self):
+        high = self._engine(self._mostly(0.92, 0.15))
+        low = self._engine(self._mostly(0.15, 0.92))
+
+        # The two tracks really do sit in different bands for almost their whole
+        # length - otherwise the rate comparison would prove nothing.
+        def band_share(engine, band):
+            bands = [
+                context_at(engine.energy, e.start).energy_band for e in engine.events
+            ]
+            return bands.count(band) / len(bands)
+
+        self.assertGreater(band_share(high, "high"), 0.8)
+        self.assertGreater(band_share(low, "low"), 0.8)
+
+        self.assertGreater(len(high.events), len(low.events))
+        self.assertGreaterEqual(
+            len(high.events) - len(low.events),
+            5,
+            f"high={len(high.events)} low={len(low.events)} - rate gap too small",
+        )
+
+    def test_a_quiet_flat_track_still_produces_at_least_one_event(self):
+        """A low-energy, flat-trend track end to end: the activation chance for
+        the 'low' band is deliberately never zero, so the DJ never goes
+        completely silent."""
+        engine = self._engine(7.0e-4)
+        self.assertTrue(engine.events, "a quiet flat track scheduled nothing at all")
+        for t in (30.0, 150.0, 270.0):
+            context = context_at(engine.energy, t)
+            with self.subTest(t=t):
+                self.assertEqual(context.energy_band, "low")
+                self.assertAlmostEqual(context.trend, 0.0, places=9)
+
+
 class TestJointSafety(unittest.TestCase):
     """10. Joint outputs stay finite and inside the rig's limits, gestures included."""
 

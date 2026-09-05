@@ -16,16 +16,20 @@ import unittest
 from ghost_in_the_deck.animation.dj_behavior import (
     HIGH_ENERGY,
     LOW_ENERGY,
+    TREND_RISING,
     GestureEvent,
     trend_at,
 )
 from ghost_in_the_deck.animation.energy import EnergyTrack
 from ghost_in_the_deck.dj_planner import (
+    ACTIVATION_BASE,
+    ACTIVATION_TREND_BOOST,
     AUDIO_ACTIONS,
     PLANNER_STRENGTH_FLOOR,
     DJActionPlanner,
     MusicalContext,
     _band_for,
+    activation_probability,
     context_at,
     decide_action,
 )
@@ -180,6 +184,65 @@ class TestPlanShape(unittest.TestCase):
         )
         self.assertEqual(planned.action, "gain_riser")
         self.assertIsNone(planned.side)
+
+
+class TestActivationProbability(unittest.TestCase):
+    """Phase 2C: the per-eligible-bar activation chance is a musically-justified
+    function of the context - busier in a higher energy band, busier still on a
+    rising trend - and stays a real probability at every input."""
+
+    BANDS = ("low", "mid", "high")
+
+    def _ctx(self, band, trend=0.0):
+        return MusicalContext(
+            time=0.0, energy=0.5, trend=trend, energy_band=band, at_bar_boundary=True
+        )
+
+    def test_monotonic_non_decreasing_low_to_mid_to_high_at_a_fixed_trend(self):
+        for trend in (0.0, TREND_RISING, TREND_RISING + 0.5, 5.0):
+            probs = [activation_probability(self._ctx(b, trend)) for b in self.BANDS]
+            with self.subTest(trend=trend):
+                for lower, higher in zip(probs, probs[1:]):
+                    self.assertLessEqual(lower, higher)
+
+    def test_the_bands_actually_differ_so_the_ordering_is_not_vacuous(self):
+        probs = {b: activation_probability(self._ctx(b)) for b in self.BANDS}
+        self.assertLess(probs["low"], probs["mid"])
+        self.assertLess(probs["mid"], probs["high"])
+
+    def test_a_rising_trend_never_lowers_a_bands_probability_and_never_passes_one(self):
+        for band in self.BANDS:
+            flat = activation_probability(self._ctx(band, 0.0))
+            for trend in (TREND_RISING + 1e-6, TREND_RISING + 0.3, 12.0):
+                rising = activation_probability(self._ctx(band, trend))
+                with self.subTest(band=band, trend=trend):
+                    self.assertGreaterEqual(rising, flat)
+                    self.assertLessEqual(rising, 1.0)
+
+    def test_a_trend_exactly_at_the_threshold_is_not_yet_rising(self):
+        # dj_behavior's own `trend > TREND_RISING` reading - the boundary is open.
+        for band in self.BANDS:
+            self.assertEqual(
+                activation_probability(self._ctx(band, TREND_RISING)),
+                activation_probability(self._ctx(band, 0.0)),
+            )
+
+    def test_probability_is_in_the_unit_interval_and_never_zero_for_any_band(self):
+        for band in self.BANDS:
+            for trend in (-3.0, 0.0, TREND_RISING, 1.0, 50.0):
+                p = activation_probability(self._ctx(band, trend))
+                with self.subTest(band=band, trend=trend):
+                    self.assertGreater(p, 0.0)
+                    self.assertLessEqual(p, 1.0)
+
+    def test_the_boost_is_exactly_the_band_base_plus_the_trend_boost_capped(self):
+        for band in self.BANDS:
+            expected = min(ACTIVATION_BASE[band] + ACTIVATION_TREND_BOOST, 1.0)
+            self.assertAlmostEqual(
+                activation_probability(self._ctx(band, TREND_RISING + 1e-6)),
+                expected,
+                places=12,
+            )
 
 
 if __name__ == "__main__":
