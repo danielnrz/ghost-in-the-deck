@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 2C**.
+This repository is currently at **Phase 3A**.
 
 ## Phase 0 scope
 
@@ -602,10 +602,12 @@ logic, and `_build_schedule` is a one-line delegation to `plan_schedule`.
 
 What Phase 2C still does **not** do:
 
-- **Still no musical-structure awareness.** Candidate positions are the same
-  fixed bar grid `_build_schedule` always walked. There is no phrase, section,
-  build, drop or breakdown detection - `activation_probability` reads only the
-  smoothed energy band and "energy now minus energy a few seconds ago".
+- **No musical-structure awareness in Phase 2C.** Candidate positions are the
+  same fixed bar grid `_build_schedule` always walked, and at this phase
+  `activation_probability` reads only the smoothed energy band and "energy now
+  minus energy a few seconds ago" - no broader-timescale trajectory. Phase 3A
+  (below) adds one; it still does no phrase, section, drop or breakdown
+  detection.
 - **Spacing and no-overlap guarantees are unchanged.** The same
   `MIN_GAP_BARS`-plus-jitter minimum separation and the same drop of any event
   that would run past the track end still apply; only *where* those constants
@@ -615,6 +617,63 @@ What Phase 2C still does **not** do:
   control.
 - **Gesture poses are unchanged.** `gesture_pose.py`, `arm_ik.py` and the rig
   are as before; only which bar hosts a gesture, and how often, changed.
+
+## A broad-trajectory signal (Phase 3A)
+
+Every energy reading so far - the groove's ~1.5 s smoothing, the DJ scheduler's
+3 s `trend_at` - is a bar-scale one: it sees a loud bar, not a two-minute rise.
+Phase 3A adds a lightweight, deterministic **musical-structure layer** on top,
+using only what audio analysis already produced. No new librosa pass, no schema
+bump: `animation/structure.py` reuses `EnergyTrack` with a longer
+`smoothing_seconds` (`PHRASE_SMOOTHING_SECONDS = 8.0`) and a generalised
+`trend_at` at a matching 8 s lookback, so a whole build or release registers as
+one movement instead of a string of wobbles.
+
+`structure_at` returns a frozen `MusicalStructure` for one playback time - a
+pure function of the smoothed-energy curve and the beat grid, so the same inputs
+always give the same instance. It carries:
+
+- **`regime`** - one of `build` / `release` / `peak` / `stable`. These are
+  honestly-named descriptions of what the broad energy is doing right now, not
+  section labels. `build` / `release` come from the broad slope clearing
+  `BUILD_SLOPE` / `-RELEASE_SLOPE`; `peak` is a broad level at or above
+  `HIGH_ENERGY` that is not moving fast; `stable` is everything else. Nothing
+  here claims to tell a "drop" from a "breakdown".
+- **`section_change_likelihood`** - a continuous `0..1` reading of how fast the
+  broad energy is moving (`min(abs(broad_trend) / SECTION_CHANGE_SCALE, 1.0)`),
+  a stand-in for "something structural is probably happening around here". Not a
+  detector, not a boolean, and not currently read by any decision.
+- **`phrase_position`** - `bar_index` folded into an eight-bar cycle
+  (`bar_index % PHRASE_LENGTH_BARS`). This is a **periodicity assumption**
+  asserted by a constant, **not detected content**: real music does not always
+  phrase in eights and this code never measures whether a given track does. It
+  is computed and tested and then **deliberately wired into no decision**.
+
+`DJActionPlanner.plan_schedule` builds one broad `EnergyTrack` per call and
+attaches `structure_at(...)` to every bar context it constructs, as
+`MusicalContext.structure`. The one place that context is read is
+`activation_probability`, the planner's single timing decision: when
+`structure` is present, a broad `build` regime adds `STRUCTURE_BUILD_BOOST`
+(0.10) and a broad `release` subtracts `STRUCTURE_RELEASE_DAMP` (0.10, smaller
+than the lowest band base so it can never reach zero); `peak` and `stable`
+leave the Phase 2C value untouched. The result: the avatar is busier through a
+broad build and quieter through a broad release. With `structure=None` nothing
+is added and `activation_probability` is **byte-identical to Phase 2C**.
+
+What Phase 3A still does **not** do:
+
+- **No semantic section detection.** There are no verse / chorus / drop /
+  breakdown labels, and no plan to infer them from four regimes and a slope.
+- **`phrase_position` changes nothing.** It is a tested convention with no
+  consumer; the eight-bar cycle is an assumption, not a measurement.
+- **Only `activation_probability` is structure-aware.**
+  `decide_action`, `decide_gesture_kind`, `gesture_side_for` and
+  `planned_strength` are unchanged by this phase - they still read only the
+  bar-scale energy band and short trend.
+- **No new audio.** `audio/effects.py` is byte-for-byte unchanged; still no
+  two-track mixing, EQ, crossfader or live parameter control.
+- **Gesture poses are unchanged.** Only how often a bar hosts a gesture during
+  a broad build or release changed.
 
 ## Tests
 
@@ -643,8 +702,18 @@ band - to the expected kind), the planner-owned timing
 (`activation_probability` strictly increasing low -> mid -> high at a fixed
 trend, staying in `[0, 1]` and never zero, a trend exactly at `TREND_RISING`
 not yet counting as rising, the `+0.15` boost applied and capped; and a
-sustained-high-energy track firing more events than a sustained-low one while
-a quiet flat track still schedules at least one), the planner-driven schedule
+sustained-high-energy track firing more events than a sustained-low one), the
+accurate quiet-track contract (`activation_probability` is `> 0` in every
+band - so a quiet stretch is never made structurally ineligible - but there is
+**no** forced-event fallback and no guarantee every quiet track produces an
+event; the concrete check is only that one specific low-energy, flat-trend
+fixture happens to schedule at least one, a fact about that fixture and seed),
+the musical-structure layer (`structure_at` deterministic, the broad trend
+following a slow multi-minute rise where the 3 s `trend_at` is dominated by
+spikes, all four regimes reachable, `phrase_position` exactly `bar_index % 8`,
+and `activation_probability` boosted under `build` / damped under `release` /
+untouched under `peak` / `stable` while its `structure=None` path stays
+byte-identical to Phase 2C), the planner-driven schedule
 (every built event's `kind`, `side` and `strength` equal exactly
 `decide_gesture_kind` / `gesture_side_for` / `planned_strength` at that event's
 start across several energy profiles, a low-band moment never scheduling
@@ -732,24 +801,32 @@ Two format notes, both learned the hard way:
   existing skinned mesh, offline and in tests; there is no runtime collision
   solver or runtime finger IK, by design.
 - Gesture and audio-action selection reason about relative energy and a short
-  trend, not real musical structure - no idea what a build-up, a drop or a
-  breakdown is. As of Phase 2B the trend is load-bearing in kind selection: a
-  rising one in the low-energy band picks `lean_in` over `deck_glance`. As of
-  Phase 2C the same `trend > TREND_RISING` reading also raises
-  `activation_probability`, so a rising passage hosts more events (and it would
-  fold into the audio decision too once an effect represents a build). But it
-  is still only "energy now minus energy a few seconds ago", not structural
-  awareness.
+  trend - no idea what a verse, a chorus, a drop or a breakdown is, and Phase 3A
+  does not change that. As of Phase 2B the trend is load-bearing in kind
+  selection: a rising one in the low-energy band picks `lean_in` over
+  `deck_glance`. As of Phase 2C the same `trend > TREND_RISING` reading also
+  raises `activation_probability`, so a rising passage hosts more events. Phase
+  3A adds a broader-timescale reading of the *same* energy curve - an eight-
+  second smoothing and slope, four honestly-named regimes
+  (`build` / `release` / `peak` / `stable`), a continuous
+  `section_change_likelihood`, and an assumed eight-bar `phrase_position` that
+  is computed and tested but wired into nothing - and lets a broad `build` or
+  `release` nudge `activation_probability` busier or quieter. It is still a
+  slope on a normalised energy envelope, not section or phrase detection: no
+  semantic labels, and `decide_action` / `decide_gesture_kind` /
+  `gesture_side_for` / `planned_strength` do not read it.
 - Gesture kind, side and strength, the audio action, *and* event timing at a
   scheduled moment are now all planner decisions read from the same musical
   context - kind/side/strength in Phase 2B, the bar choice itself in Phase 2C.
   The old independent weighted-random kind roll and `DJBehaviorEngine`'s flat
   activation/gap roll are both gone: `DJActionPlanner.plan_schedule` owns the
   bar-walk and `activation_probability` scales the per-bar chance with the
-  energy band and a rising trend. What is still *not* modelled is musical
-  structure - the walk is the same fixed bar grid, with no phrase, section,
-  build or drop detection, and the `MIN_GAP_BARS` spacing and past-track-end
-  drop are unchanged.
+  energy band, a rising short trend, and - as of Phase 3A - the broad
+  `build` / `release` regime. What is still *not* modelled is musical structure
+  in any semantic sense: the walk is the same fixed bar grid, there are no
+  verse / chorus / drop / breakdown labels, `phrase_position` is an assumed
+  eight-bar cycle that drives no decision, and the `MIN_GAP_BARS` spacing and
+  past-track-end drop are unchanged. There is still no two-track mixing.
 - Bars are assumed to be four beats. A track in another metre still grooves,
   and gestures still land on a bar boundary, but the wrong one.
 - Before the first detected beat and after the last, the beat grid is
