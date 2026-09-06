@@ -134,6 +134,21 @@ def test_sample_count_rejects_duration_rate_overflow():
         _ = clock.sample_count
 
 
+@pytest.mark.parametrize(
+    "field", ["outgoing_time", "incoming_time", "outgoing_duration_seconds", "incoming_duration_seconds"]
+)
+def test_unrepresentably_large_plan_integers_raise_value_error(field):
+    plan = dataclasses.replace(_plan(), **{field: 10**10000})
+
+    with pytest.raises(ValueError):
+        TransitionClock(plan, sample_rate=2)
+
+
+def test_unrepresentably_large_sample_rate_raises_value_error():
+    with pytest.raises(ValueError):
+        _ = TransitionClock(_plan(), sample_rate=10**10000).sample_count
+
+
 def test_elapsed_mapping_rejects_times_outside_executable_window():
     clock = TransitionClock(_plan(outgoing_duration=4.0, incoming_duration=6.0), 1000)
 

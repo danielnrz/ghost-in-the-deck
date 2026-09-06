@@ -50,7 +50,10 @@ def _validate_plan_number(value: object, name: str) -> float:
     """Return a finite plan number, with one ValueError failure contract."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
         raise ValueError(f"{name} must be a finite non-negative number")
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative number") from exc
     if not math.isfinite(number) or number < 0.0:
         raise ValueError(f"{name} must be a finite non-negative number")
     return number
@@ -94,10 +97,16 @@ def _source_start_index(anchor_seconds: float, sample_rate: float, name: str) ->
     built-in ``round`` uses ties-to-even, which would make the result depend
     on whether the preceding frame index was even or odd.
     """
-    anchor = float(anchor_seconds)
+    try:
+        anchor = float(anchor_seconds)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative number") from exc
     if not math.isfinite(anchor) or anchor < 0.0:
         raise ValueError(f"{name} must be a finite non-negative number")
-    frame_position = anchor * sample_rate
+    try:
+        frame_position = anchor * sample_rate
+    except OverflowError as exc:
+        raise ValueError(f"{name} is outside the addressable sample range") from exc
     if not math.isfinite(frame_position):
         raise ValueError(f"{name} is outside the addressable sample range")
     return math.floor(frame_position + 0.5)
@@ -277,13 +286,21 @@ class TransitionClock:
     @property
     def sample_count(self) -> int:
         """Number of output samples, rounded to the nearest sample half-up."""
-        sample_position = self.executable_duration_seconds * self.sample_rate
+        try:
+            sample_position = self.executable_duration_seconds * self.sample_rate
+        except OverflowError as exc:
+            raise ValueError(
+                "transition duration is outside the addressable sample range"
+            ) from exc
         if not math.isfinite(sample_position):
             raise ValueError("transition duration is outside the addressable sample range")
         return math.floor(sample_position + 0.5)
 
     def _check_elapsed(self, elapsed_seconds: float) -> float:
-        elapsed = float(elapsed_seconds)
+        try:
+            elapsed = float(elapsed_seconds)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError("elapsed_seconds must be finite") from exc
         if not math.isfinite(elapsed):
             raise ValueError("elapsed_seconds must be finite")
         if not 0.0 <= elapsed <= self.executable_duration_seconds:
