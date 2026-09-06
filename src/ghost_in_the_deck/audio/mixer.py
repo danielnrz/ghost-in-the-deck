@@ -1,9 +1,9 @@
-"""Deterministic two-source transition timing primitives.
+"""Deterministic two-source transition timing and array mixing primitives.
 
-This module contains the offline timing contract for a transition.  It does
-not load audio, stretch time, apply a crossfade, or depend on Panda3D.  A
+This module does not load audio, stretch time, or depend on Panda3D.  A
 ``TransitionClock`` turns a planned pair of source cues into one executable
-window in which both source clocks advance by the same elapsed amount.
+window in which both source clocks advance by the same elapsed amount, and
+``execute_transition`` renders that window from already-decoded PCM arrays.
 """
 
 from __future__ import annotations
@@ -14,6 +14,120 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..transition import TransitionPlan
+
+
+def _as_float_channels(samples: np.ndarray, name: str) -> tuple[np.ndarray, bool]:
+    """Validate one PCM buffer and return an owned, channel-normalized view.
+
+    The internal representation always has shape ``(frames, channels)``.  The
+    second return value records whether the caller supplied a one-dimensional
+    mono buffer so the executor can return the corresponding shape.
+    """
+    try:
+        raw = np.asarray(samples)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a numeric PCM array") from exc
+
+    if raw.ndim not in (1, 2):
+        raise ValueError(f"{name} must have shape (frames,) or (frames, channels)")
+    if raw.dtype.kind in "bc":
+        raise ValueError(f"{name} must contain real numeric samples")
+    try:
+        pcm = np.array(raw, dtype=np.float64, copy=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must contain float-compatible samples") from exc
+    if not np.all(np.isfinite(pcm)):
+        raise ValueError(f"{name} must contain only finite samples")
+
+    was_mono = pcm.ndim == 1
+    if was_mono:
+        pcm = pcm[:, None]
+    elif pcm.shape[1] < 1:
+        raise ValueError(f"{name} must have at least one channel")
+    return pcm, was_mono
+
+
+def _source_start_index(anchor_seconds: float, sample_rate: float, name: str) -> int:
+    """Map an absolute source-time anchor to its nearest PCM frame."""
+    anchor = float(anchor_seconds)
+    if not math.isfinite(anchor) or anchor < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    frame_position = anchor * sample_rate
+    if not math.isfinite(frame_position):
+        raise ValueError(f"{name} is outside the addressable sample range")
+    return int(round(frame_position))
+
+
+def execute_transition(
+    outgoing_samples: np.ndarray,
+    incoming_samples: np.ndarray,
+    plan: TransitionPlan,
+    sample_rate: float,
+) -> np.ndarray:
+    """Render one planned transition from two decoded PCM sample arrays.
+
+    The two buffers are interpreted as complete source tracks beginning at
+    source time zero.  The plan's absolute cue times select the first outgoing
+    and incoming frames; every subsequent output frame reads the next frame
+    from each source, with no resampling or time-stretching.  The executable
+    window is the shorter duration recorded by the plan and uses the linear
+    endpoint-owned gain envelope from :func:`linear_crossfade_gains`.
+
+    Mono arrays have shape ``(frames,)`` and multi-channel arrays have shape
+    ``(frames, channels)``.  The buffers must have the same channel count and
+    enough frames after their respective anchors for the complete transition.
+    Inputs are copied before processing and the returned array owns its data.
+    """
+    if not isinstance(plan, TransitionPlan):
+        raise TypeError("plan must be a TransitionPlan")
+
+    outgoing, outgoing_was_mono = _as_float_channels(
+        outgoing_samples, "outgoing_samples"
+    )
+    incoming, incoming_was_mono = _as_float_channels(
+        incoming_samples, "incoming_samples"
+    )
+    if outgoing.shape[1] != incoming.shape[1]:
+        raise ValueError(
+            "outgoing and incoming arrays must have the same channel count"
+        )
+
+    clock = TransitionClock(plan, sample_rate)
+    sample_count = clock.sample_count
+    if sample_count < 1:
+        raise ValueError("transition must contain at least one output sample")
+
+    outgoing_start = _source_start_index(
+        clock.outgoing_anchor_seconds, clock.sample_rate, "outgoing anchor"
+    )
+    incoming_start = _source_start_index(
+        clock.incoming_anchor_seconds, clock.sample_rate, "incoming anchor"
+    )
+    if outgoing_start + sample_count > outgoing.shape[0]:
+        raise ValueError(
+            "outgoing_samples do not contain the complete transition window"
+        )
+    if incoming_start + sample_count > incoming.shape[0]:
+        raise ValueError(
+            "incoming_samples do not contain the complete transition window"
+        )
+
+    outgoing_gain, incoming_gain = linear_crossfade_gains(sample_count)
+    outgoing_window = outgoing[outgoing_start : outgoing_start + sample_count]
+    incoming_window = incoming[incoming_start : incoming_start + sample_count]
+    mixed = (
+        outgoing_window * outgoing_gain[:, None]
+        + incoming_window * incoming_gain[:, None]
+    )
+
+    if outgoing_was_mono and incoming_was_mono:
+        return np.array(mixed[:, 0], dtype=np.float64, copy=True)
+    return np.array(mixed, dtype=np.float64, copy=True)
+
+
+# ``mix_transition`` is the concise name used by callers that treat this
+# module as a mixer; keep the descriptive executor name as the implementation.
+mix_transition = execute_transition
 
 
 def linear_crossfade_gains(sample_count: int) -> tuple[np.ndarray, np.ndarray]:

@@ -3,7 +3,11 @@ import dataclasses
 import numpy as np
 import pytest
 
-from ghost_in_the_deck.audio.mixer import TransitionClock, linear_crossfade_gains
+from ghost_in_the_deck.audio.mixer import (
+    TransitionClock,
+    execute_transition,
+    linear_crossfade_gains,
+)
 from ghost_in_the_deck.transition import TransitionPlan
 
 
@@ -127,3 +131,139 @@ def test_linear_crossfade_returns_independent_arrays():
     outgoing[1] = 0.0
 
     np.testing.assert_array_equal(incoming, [0.0, 0.5, 1.0])
+
+
+def test_execute_transition_slices_at_anchors_and_owns_endpoints():
+    plan = _plan(
+        outgoing_time=2.0,
+        incoming_time=3.0,
+        outgoing_duration=4.0,
+        incoming_duration=5.0,
+    )
+    outgoing = np.arange(8, dtype=np.float32)
+    incoming = np.arange(8, dtype=np.float32) + 100.0
+
+    result = execute_transition(outgoing, incoming, plan, sample_rate=1)
+
+    np.testing.assert_allclose(result, [2.0, 110.0 / 3.0, 214.0 / 3.0, 106.0])
+    assert result.shape == (4,)
+    assert result[0] == outgoing[2]
+    assert result[-1] == incoming[6]
+    assert result.flags.owndata
+    assert not np.shares_memory(result, outgoing)
+    assert not np.shares_memory(result, incoming)
+
+
+def test_execute_transition_mixes_stereo_channels_independently():
+    plan = _plan(
+        outgoing_time=1.0,
+        incoming_time=2.0,
+        outgoing_duration=3.0,
+        incoming_duration=4.0,
+    )
+    outgoing = np.array(
+        [[-9.0, 9.0], [1.0, 10.0], [2.0, 20.0], [3.0, 30.0]],
+        dtype=np.float32,
+    )
+    incoming = np.array(
+        [
+            [-8.0, 8.0],
+            [-7.0, 7.0],
+            [100.0, 1000.0],
+            [200.0, 2000.0],
+            [300.0, 3000.0],
+        ],
+        dtype=np.float32,
+    )
+
+    result = execute_transition(outgoing, incoming, plan, sample_rate=1)
+
+    np.testing.assert_allclose(
+        result,
+        [[1.0, 10.0], [101.0, 1010.0], [300.0, 3000.0]],
+    )
+    assert result.shape == (3, 2)
+
+
+def test_execute_transition_is_deterministic_and_preserves_sources():
+    plan = _plan(outgoing_time=1.0, incoming_time=1.0, outgoing_duration=4.0, incoming_duration=4.0)
+    outgoing = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
+    incoming = np.linspace(1.0, -1.0, 8, dtype=np.float32)
+    outgoing_before = outgoing.copy()
+    incoming_before = incoming.copy()
+
+    first = execute_transition(outgoing, incoming, plan, sample_rate=1)
+    second = execute_transition(outgoing, incoming, plan, sample_rate=1)
+    first[0] = 999.0
+
+    np.testing.assert_array_equal(first[1:], second[1:])
+    np.testing.assert_array_equal(outgoing, outgoing_before)
+    np.testing.assert_array_equal(incoming, incoming_before)
+    assert not np.shares_memory(second, outgoing)
+    assert not np.shares_memory(second, incoming)
+
+
+@pytest.mark.parametrize(
+    "outgoing, incoming, plan, sample_rate, message",
+    [
+        (
+            np.zeros((8, 2)),
+            np.zeros(8),
+            _plan(outgoing_duration=2.0, incoming_duration=2.0),
+            1,
+            "channel",
+        ),
+        (
+            np.zeros((8, 1, 1)),
+            np.zeros(8),
+            _plan(outgoing_duration=2.0, incoming_duration=2.0),
+            1,
+            "shape",
+        ),
+        (
+            np.zeros(2),
+            np.zeros(8),
+            _plan(outgoing_duration=4.0, incoming_duration=4.0),
+            1,
+            "complete transition",
+        ),
+        (
+            np.zeros(8),
+            np.zeros(8),
+            _plan(outgoing_time=-1.0, outgoing_duration=2.0, incoming_duration=2.0),
+            1,
+            "anchor",
+        ),
+        (
+            np.zeros(8),
+            np.zeros(8),
+            _plan(outgoing_duration=2.0, incoming_duration=2.0),
+            0,
+            "sample_rate",
+        ),
+        (
+            np.zeros(8),
+            np.zeros(8),
+            _plan(outgoing_duration=0.0, incoming_duration=0.0),
+            1,
+            "output sample",
+        ),
+    ],
+)
+def test_execute_transition_rejects_invalid_inputs(
+    outgoing, incoming, plan, sample_rate, message
+):
+    with pytest.raises((TypeError, ValueError), match=message):
+        execute_transition(outgoing, incoming, plan, sample_rate)
+
+
+def test_execute_transition_rejects_non_finite_pcm():
+    plan = _plan(outgoing_duration=2.0, incoming_duration=2.0)
+
+    with pytest.raises(ValueError, match="finite"):
+        execute_transition(
+            np.array([0.0, np.nan, 0.0]),
+            np.zeros(3),
+            plan,
+            sample_rate=1,
+        )
