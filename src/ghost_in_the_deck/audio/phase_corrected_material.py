@@ -23,6 +23,12 @@ from .tempo_match import (
 )
 
 
+# Phase 4E is intentionally a one-sample boundary correction.  The accepted
+# Phase 4D playback-rate range keeps the measured initial offset within this
+# bound; anything larger indicates an invalid or manually inconsistent match.
+MAX_INITIAL_CUE_CORRECTION_SAMPLES = 1
+
+
 def _as_float_pcm(samples: object) -> tuple[np.ndarray, bool]:
     """Validate PCM and return an owned float64 array plus its mono flag."""
     try:
@@ -191,6 +197,10 @@ def phase_correct_incoming_transition(
     relationship = phase_relationship_for_match(
         plan, match, outgoing_timeline, incoming_timeline
     )
+    if abs(relationship.initial_correction_samples) > MAX_INITIAL_CUE_CORRECTION_SAMPLES:
+        raise ValueError(
+            "initial phase correction exceeds the one-sample Phase 4E policy"
+        )
     transformed = stretch_incoming_transition(incoming_samples, plan, sample_rate)
     return _apply_initial_incoming_cue_correction(
         transformed,
@@ -213,6 +223,10 @@ def phase_correct_incoming_transition_with_relationship(
     relationship = phase_relationship_for_match(
         plan, match, outgoing_timeline, incoming_timeline
     )
+    if abs(relationship.initial_correction_samples) > MAX_INITIAL_CUE_CORRECTION_SAMPLES:
+        raise ValueError(
+            "initial phase correction exceeds the one-sample Phase 4E policy"
+        )
     transformed = stretch_incoming_transition(incoming_samples, plan, sample_rate)
     corrected = _apply_initial_incoming_cue_correction(
         transformed,

@@ -4,8 +4,9 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 4C**: an offline two-file transition
-preview built on the frozen Phase 4B PCM executor.
+This repository is currently at **Phase 4E**: an offline two-file transition
+preview with bounded BPM matching and deterministic initial beat-phase
+correction, built on the frozen Phase 4B PCM executor.
 
 ## Phase 0 scope
 
@@ -846,9 +847,9 @@ There is no time-stretching. Source frames advance one-for-one at the shared
 sample rate, both source clocks advance by the same elapsed seconds, and the
 shorter planned window determines the output length. The reported end drift is
 the signed tempo-only separation predicted over that window; it does not
-correct the initial anchor phase, re-align beats, or stretch either source.
-With unequal tempos, that drift is an expected diagnostic and may be audible;
-the preview does not claim beat synchronisation.
+re-align beats or stretch either source. With unequal tempos, that drift is an
+expected diagnostic and may be audible; the no-stretch preview does not claim
+beat synchronisation.
 
 An explicit BPM-matched preview is also available for the offline path:
 
@@ -860,11 +861,46 @@ PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.transition_preview \
 This mode transforms only the incoming transition window with the documented
 pitch-preserving material path. Its supported playback-rate policy is
 inclusive from `0.80` through `1.25`; requests below `0.80` or above `1.25`
-fail instead of changing the target. The summary retains the no-stretch drift
-as the before value and adds the residual whole-sample mapping after the
-transform. It does not change cue anchors, re-align beat phase, or claim
-semantic synchronization. `--bpm-match` is a shortcut for
-`--mode bpm-matched`.
+fail instead of changing the target. The outgoing transition duration is
+authoritative, and the incoming source prefix and suffix remain outside the
+transformed window. The summary retains the no-stretch drift as the before
+value and adds the residual whole-sample mapping after the transform.
+`--bpm-match` is a shortcut for `--mode bpm-matched`.
+
+The transform is offline and pitch-preserving only. It does not wire into live
+playback, change the selected `TransitionPlan`, resample either source, or add
+EQ, key matching, semantic alignment, playlist decisions, or visual actions.
+
+## Initial beat-phase correction (Phase 4E)
+
+Phase 4E applies one small, deterministic correction to the accepted Phase 4D
+material. The policy is deliberately bounded:
+
+1. Use only the two selected, actually detected `BeatTimeline` cues. If either
+   selected anchor is virtual, the BPM-matched render still works but phase
+   fields are reported as unavailable and no correction is invented.
+2. Convert each cue timestamp to its nearest sample with half-up rounding.
+   Map the incoming cue's fractional sample position through the actual
+   Phase 4D source-to-transformed window scale and compare it with the
+   outgoing cue's fractional position.
+3. Define the signed error as incoming minus outgoing. Apply the opposite sign
+   rounded to the nearest integer sample, with signed half ties away from zero.
+   The accepted BPM-rate bounds keep this correction within `-1`, `0`, or `+1`
+   sample; a larger correction is rejected as an invalid match.
+4. Shift only the transformed incoming window. A positive correction delays
+   incoming material and a negative correction advances it. The vacated edge
+   holds the nearest window sample, so the result keeps the same length and
+   preserves sample order, pitch, source prefix, and source suffix.
+5. The correction is initial-only. It does not continuously warp the beat grid,
+   inspect later beats, move either cue anchor, or claim semantic or harmonic
+   synchronisation. The remaining initial error is at most half a sample,
+   subject to the documented tie convention.
+
+`phase-aligned` is the explicit CLI name for the BPM-matched path with this
+correction (`--phase-align` is its shortcut). The existing `bpm-matched` mode
+uses the same corrected material path; both modes report the timestamped
+before/correction/after diagnostics. The Phase 4E code remains an offline
+material boundary and still delegates final mixing to the Phase 4B executor.
 
 Generated test audio is created under pytest temporary directories. Private
 tracks belong in `testMusic/`, whose contents are ignored, and previews,
@@ -969,19 +1005,39 @@ anchors, equal-elapsed-time absolute mappings, deterministic sample counts,
 shortest-window execution without stretching, endpoint-owned linear gains,
 independent mono and stereo channel mixing, invalid-input rejection, and
 source/result memory independence. The focused two-deck and single-track
-regression command, including the Phase 4C preview and drift checks, is:
+regression command, including the Phase 4C-4E preview, phase, and drift checks,
+is:
 
 ```bash
-cd /home/daniel/Documents/Programming/ghost-in-the-deck && PYTHONPATH=src:tests DISPLAY=:1 .venv/bin/python -m pytest tests/test_transition_preview.py tests/test_transition_diagnostics.py tests/test_transition_mixer.py tests/test_transition.py tests/test_deck.py tests/test_dj_planner.py tests/test_dj_behavior.py tests/test_musical_structure.py tests/test_review_fixes.py -q
+cd /home/daniel/Documents/Programming/ghost-in-the-deck && PYTHONPATH=src:tests DISPLAY=:1 .venv/bin/python -m pytest tests/test_beat_phase.py tests/test_phase_corrected_material.py tests/test_phase_aligned_preview.py tests/test_transition_tempo_match.py tests/test_transition_preview.py tests/test_transition_diagnostics.py tests/test_transition_mixer.py tests/test_transition.py tests/test_deck.py tests/test_dj_planner.py tests/test_dj_behavior.py tests/test_musical_structure.py tests/test_review_fixes.py -q
 ```
 
-`test_transition_preview.py` uses only generated synthetic tracks to prove
+The phase tests use only generated synthetic tracks to prove deterministic
+sample mapping, the bounded initial correction, corrected preview diagnostics,
+and pitch-preserving material handling. `test_transition_preview.py` uses only
+generated synthetic tracks to prove
 deterministic owned WAV output, PCM16 format, source-file immutability, reuse
 of the Phase 4B executor, the end-to-end signed drift report, and the explicit
 no-plan failure. `test_transition_diagnostics.py` checks the same drift model
 against synthetic beat grids, including equal tempos, differing tempos, and
-virtual anchors. The Phase 4B boundary remains frozen: no live playback,
-beat re-alignment, resampling, or time-stretching is implied by this preview.
+virtual anchors. Run the repository Git Guard separately from the focused
+suite:
+
+```bash
+cd /home/daniel/Documents/Programming/ghost-in-the-deck && .venv/bin/python scripts/git_guard.py
+```
+
+The guard checks tracked generated directories, private test media, private
+audio/video suffixes, branch safety, and Git whitespace errors. The complete
+suite remains:
+
+```bash
+PYTHONPATH=src:tests .venv/bin/python -m pytest -q
+```
+
+The Phase 4B boundary remains frozen: no live playback, beat re-alignment,
+resampling, or time-stretching is implied by the no-stretch preview. The Phase
+4D/4E transform and initial correction are still offline-only.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
