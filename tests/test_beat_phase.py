@@ -43,6 +43,22 @@ def test_time_and_subspan_mapping_are_half_open():
     assert mapping.map_source_span(SampleSpan(12, 17)).count == 7
 
 
+@pytest.mark.parametrize(
+    ("source_span", "transformed_span"),
+    [
+        (SampleSpan(0, 13), SampleSpan(0, 15)),
+        (SampleSpan(0, 120273), SampleSpan(0, 130667)),
+    ],
+)
+def test_complete_source_span_maps_to_exact_transformed_endpoint(
+    source_span: SampleSpan, transformed_span: SampleSpan
+):
+    mapping = TransformedSampleMapping(source_span, transformed_span)
+
+    assert mapping.source_boundary_to_transformed(source_span.end) == transformed_span.end
+    assert mapping.map_source_span(source_span) == transformed_span
+
+
 def test_signed_phase_offset_and_initial_correction_use_transformed_mapping():
     outgoing = anchor_cue(_timeline([1.24]), cue_index=0, sample_rate=10)
     incoming = anchor_cue(_timeline([2.36]), cue_index=0, sample_rate=10)

@@ -102,10 +102,11 @@ class TransformedSampleMapping:
 
     The mapping is affine over sample *boundaries*.  It maps source boundary
     ``source_span.start`` to transformed boundary ``transformed_span.start``
-    and the source end boundary to the transformed end boundary.  Mapping a
-    source sub-span floors both transformed boundaries, preserving the
-    half-open convention.  This object describes indices only; it does not
-    transform audio and is not a continuous beat-grid correction.
+    and the source end boundary to the transformed end boundary.  Mapping an
+    interior source boundary floors the interpolated transformed position;
+    the two complete-span endpoints remain exact so the half-open contract is
+    preserved.  This object describes indices only; it does not transform
+    audio and is not a continuous beat-grid correction.
     """
 
     source_span: SampleSpan
@@ -139,6 +140,8 @@ class TransformedSampleMapping:
         boundary = int(source_boundary)
         if not self.source_span.start <= boundary <= self.source_span.end:
             raise ValueError("source boundary is outside the source span")
+        if boundary == self.source_span.end:
+            return self.transformed_span.end
         relative = boundary - self.source_span.start
         return self.transformed_span.start + math.floor(relative * self.scale)
 
