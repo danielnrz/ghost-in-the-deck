@@ -12,6 +12,7 @@ import ghost_in_the_deck.transition_preview as transition_preview
 from ghost_in_the_deck.transition_preview import (
     IncompatiblePCMError,
     NoTransitionPlanError,
+    format_preview_summary,
     render_transition_preview,
 )
 from synthetic import SAMPLE_RATE, make_beat_track
@@ -60,6 +61,40 @@ def test_generated_tracks_render_deterministic_pcm16_wav_and_report_drift(
     assert first_report.diagnostics.predicted_end_drift_outgoing_beats < -7.0
     assert outgoing.read_bytes() == outgoing_before
     assert incoming.read_bytes() == incoming_before
+
+
+def test_bpm_matched_preview_reduces_residual_drift_without_claiming_alignment(
+    tmp_path: Path,
+):
+    outgoing = make_beat_track(
+        tmp_path / "outgoing.wav", bpm=120.0, seconds=40.0
+    )
+    incoming = make_beat_track(
+        tmp_path / "incoming.wav", bpm=90.0, seconds=40.0
+    )
+    report = transition_preview._render_transition_preview(
+        outgoing,
+        incoming,
+        tmp_path / "matched-preview.wav",
+        refresh=False,
+        analysis_dir=tmp_path / "analysis",
+        margin_seconds=16.0,
+        limit_per_deck=5,
+        transition_bars=8,
+        mode="bpm-matched",
+    )
+
+    assert report.mode == "bpm-matched"
+    assert report.diagnostics.predicted_end_drift_seconds < -3.0
+    assert report.before_diagnostics == report.diagnostics
+    assert report.after_diagnostics is not None
+    matched = report.after_diagnostics
+    assert matched.source_sample_count != matched.transformed_sample_count
+    assert matched.transformed_sample_count == matched.outgoing_sample_count
+    assert abs(matched.residual_end_drift_seconds) < 1.0 / report.sample_rate
+    summary = format_preview_summary(report)
+    assert "BPM-matched sample mapping" in summary
+    assert "semantic alignment is not claimed" in summary
 
 
 def test_same_named_sources_use_distinct_feature_cache_entries(tmp_path: Path):

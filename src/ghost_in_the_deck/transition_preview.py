@@ -15,9 +15,9 @@ import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 import numpy as np
 
@@ -25,6 +25,13 @@ from .audio.analysis import analyse
 from .audio.decode import to_wav
 from .audio.features import SCHEMA_VERSION, MusicFeatures
 from .audio.mixer import execute_transition
+from .audio.tempo_match import (
+    SUPPORTED_PLAYBACK_RATE_MAX,
+    SUPPORTED_PLAYBACK_RATE_MIN,
+    TempoMatch,
+    stretch_incoming_transition,
+    tempo_match,
+)
 from .deck import TrackDeck
 from .transition_diagnostics import TransitionDiagnostics, diagnose_transition_drift
 from .transition import (
@@ -37,6 +44,7 @@ from .transition import (
 )
 
 PathLike: TypeAlias = Path | str
+PreviewMode: TypeAlias = Literal["no-stretch", "bpm-matched"]
 
 ROOT = Path(__file__).resolve().parents[2]
 ANALYSIS_DIR = ROOT / "out" / "analysis"
@@ -55,14 +63,141 @@ class IncompatiblePCMError(TransitionPreviewError):
 
 
 @dataclass(frozen=True)
+class TransitionMappingDiagnostics:
+    """Measured sample mapping for an explicitly BPM-matched preview.
+
+    These values describe the material actually handed to the frozen mixer,
+    not a claim that the two tracks are semantically or phase aligned.  The
+    residual is expressed against the outgoing output window after the
+    transformed incoming window has been rounded to whole samples.
+    """
+
+    sample_rate: int
+    source_sample_count: int
+    transformed_sample_count: int
+    outgoing_sample_count: int
+    source_duration_seconds: float
+    transformed_duration_seconds: float
+    outgoing_duration_seconds: float
+    residual_end_drift_seconds: float
+    residual_end_drift_outgoing_beats: float | None
+    residual_end_drift_incoming_beats: float | None
+    incoming_playback_rate: float
+
+    @property
+    def end_drift_seconds(self) -> float:
+        """Short name for the residual sample-mapping drift."""
+        return self.residual_end_drift_seconds
+
+    @property
+    def end_drift_outgoing_beats(self) -> float | None:
+        """Residual drift in outgoing beat units, when the grid is usable."""
+        return self.residual_end_drift_outgoing_beats
+
+    @property
+    def end_drift_incoming_beats(self) -> float | None:
+        """Residual drift in incoming beat units, when the grid is usable."""
+        return self.residual_end_drift_incoming_beats
+
+    @property
+    def predicted_end_drift_seconds(self) -> float:
+        """Compatibility spelling for the post-transform residual."""
+        return self.residual_end_drift_seconds
+
+    @property
+    def predicted_end_drift_outgoing_beats(self) -> float | None:
+        """Compatibility spelling for the post-transform residual."""
+        return self.residual_end_drift_outgoing_beats
+
+    @property
+    def predicted_end_drift_incoming_beats(self) -> float | None:
+        """Compatibility spelling for the post-transform residual."""
+        return self.residual_end_drift_incoming_beats
+
+
+@dataclass(frozen=True)
+class TransitionPreviewDiagnostics:
+    """Before/after diagnostics for one preview.
+
+    ``before`` is always the established no-time-stretch tempo diagnostic.
+    ``after`` exists only for ``bpm-matched`` mode and reports the actual
+    transformed sample counts.  Delegated properties retain the Phase 4C
+    ``report.diagnostics.predicted_*`` access pattern for callers that only
+    need the original no-stretch measurement.
+    """
+
+    before: TransitionDiagnostics
+    after: TransitionMappingDiagnostics | None = None
+
+    @property
+    def no_stretch(self) -> TransitionDiagnostics:
+        """The before diagnostic for the untransformed source mapping."""
+        return self.before
+
+    @property
+    def bpm_matched(self) -> TransitionMappingDiagnostics | None:
+        """The after diagnostic, when BPM-matched mode was requested."""
+        return self.after
+
+    @property
+    def predicted_end_drift_seconds(self) -> float | None:
+        return self.before.predicted_end_drift_seconds
+
+    @property
+    def predicted_end_drift_outgoing_beats(self) -> float | None:
+        return self.before.predicted_end_drift_outgoing_beats
+
+    @property
+    def predicted_end_drift_incoming_beats(self) -> float | None:
+        return self.before.predicted_end_drift_incoming_beats
+
+    @property
+    def initial_alignment_seconds(self) -> float | None:
+        return self.before.initial_alignment_seconds
+
+    @property
+    def initial_alignment_beat_fraction(self) -> float | None:
+        return self.before.initial_alignment_beat_fraction
+
+    @property
+    def transition_duration_seconds(self) -> float:
+        return self.before.transition_duration_seconds
+
+    def __getattr__(self, name: str) -> object:
+        """Keep direct access to fields added to ``TransitionDiagnostics``."""
+        return getattr(self.before, name)
+
+
+@dataclass(frozen=True)
 class TransitionPreviewReport:
-    """The plan and diagnostics belonging to one written preview WAV."""
+    """The plan and before/after diagnostics for one written preview WAV."""
 
     output_path: Path
     plan: TransitionPlan
     diagnostics: TransitionDiagnostics
     sample_rate: int
     channels: int
+    mode: PreviewMode = "no-stretch"
+    before_diagnostics: TransitionDiagnostics | None = None
+    after_diagnostics: TransitionMappingDiagnostics | None = None
+
+    @property
+    def preview_diagnostics(self) -> TransitionPreviewDiagnostics:
+        """Return the before/after diagnostic pair for this preview."""
+        return TransitionPreviewDiagnostics(
+            before=self.before_diagnostics or self.diagnostics,
+            after=self.after_diagnostics,
+        )
+
+    @property
+    def before(self) -> TransitionDiagnostics:
+        """The no-stretch diagnostic retained for comparison."""
+        return self.before_diagnostics or self.diagnostics
+
+    @property
+    def matched_diagnostics(self) -> TransitionMappingDiagnostics | None:
+        """Alias for the BPM-matched after diagnostic."""
+        return self.after_diagnostics
 
 
 def _feature_cache_path(track: Path, cache_dir: Path) -> Path:
@@ -213,6 +348,54 @@ def _validate_compatible_pcm(
     return outgoing_rate
 
 
+def _validate_preview_mode(mode: str) -> PreviewMode:
+    """Validate the explicit source-clock policy used by a preview."""
+    if mode not in ("no-stretch", "bpm-matched"):
+        raise TransitionPreviewError(
+            "preview mode must be one of: no-stretch, bpm-matched"
+        )
+    return mode
+
+
+def _matched_mapping_diagnostics(
+    match: TempoMatch,
+    sample_rate: int,
+    outgoing_timeline: object,
+    incoming_timeline: object,
+) -> TransitionMappingDiagnostics:
+    """Measure the post-transform window from its actual sample counts."""
+    # Importing the concrete timeline type only for the optional beat-unit
+    # conversion keeps this orchestration module independent of cue planning.
+    outgoing_interval = getattr(outgoing_timeline, "nominal_interval", 0.0)
+    incoming_interval = getattr(incoming_timeline, "nominal_interval", 0.0)
+    outgoing_sample_count = match.matched_sample_count
+    residual_samples = match.matched_sample_count - outgoing_sample_count
+    residual_seconds = residual_samples / sample_rate
+    outgoing_beats = (
+        residual_seconds / outgoing_interval
+        if outgoing_interval > 0.0
+        else None
+    )
+    incoming_beats = (
+        residual_seconds / incoming_interval
+        if incoming_interval > 0.0
+        else None
+    )
+    return TransitionMappingDiagnostics(
+        sample_rate=sample_rate,
+        source_sample_count=match.incoming_sample_count,
+        transformed_sample_count=match.matched_sample_count,
+        outgoing_sample_count=outgoing_sample_count,
+        source_duration_seconds=match.incoming_sample_count / sample_rate,
+        transformed_duration_seconds=match.matched_sample_count / sample_rate,
+        outgoing_duration_seconds=match.matched_sample_count / sample_rate,
+        residual_end_drift_seconds=residual_seconds,
+        residual_end_drift_outgoing_beats=outgoing_beats,
+        residual_end_drift_incoming_beats=incoming_beats,
+        incoming_playback_rate=match.incoming_playback_rate,
+    )
+
+
 def _validated_paths(
     outgoing_source: PathLike,
     incoming_source: PathLike,
@@ -282,8 +465,15 @@ def _render_transition_preview(
     margin_seconds: float,
     limit_per_deck: int,
     transition_bars: int,
+    mode: PreviewMode = "no-stretch",
 ) -> TransitionPreviewReport:
-    """Render once and retain the exact plan used for the CLI report."""
+    """Render once and retain the exact plan used for the CLI report.
+
+    ``no-stretch`` keeps the Phase 4C source mapping.  ``bpm-matched`` applies
+    the documented pitch-preserving transform to only the incoming plan
+    window before invoking the same executor.
+    """
+    mode = _validate_preview_mode(mode)
     outgoing_path, incoming_path, output_path = _validated_paths(
         outgoing_source, incoming_source, output_wav
     )
@@ -303,9 +493,34 @@ def _render_transition_preview(
     outgoing_pcm = _load_pcm(outgoing_path)
     incoming_pcm = _load_pcm(incoming_path)
     sample_rate = _validate_compatible_pcm(outgoing_pcm, incoming_pcm)
+    mixer_plan = plan
+    mixer_incoming = incoming_pcm[0]
+    matched_mapping: TransitionMappingDiagnostics | None = None
+    if mode == "bpm-matched":
+        try:
+            match = tempo_match(plan, sample_rate)
+            mixer_incoming = stretch_incoming_transition(
+                incoming_pcm[0], plan, sample_rate
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise IncompatiblePCMError(
+                "could not BPM-match the incoming transition material"
+            ) from exc
+        # The material transform owns the incoming window's new duration.  The
+        # frozen mixer still receives the same selected cues and only needs a
+        # plan whose executable window includes that transformed duration.
+        mixer_plan = replace(
+            plan, incoming_duration_seconds=plan.outgoing_duration_seconds
+        )
+        matched_mapping = _matched_mapping_diagnostics(
+            match,
+            sample_rate,
+            TrackDeck.from_features(outgoing_features).timeline,
+            TrackDeck.from_features(incoming_features).timeline,
+        )
     try:
         mixed = execute_transition(
-            outgoing_pcm[0], incoming_pcm[0], plan, sample_rate=sample_rate
+            outgoing_pcm[0], mixer_incoming, mixer_plan, sample_rate=sample_rate
         )
     except ValueError as exc:
         raise IncompatiblePCMError(
@@ -366,7 +581,7 @@ def _render_transition_preview(
             except FileNotFoundError:
                 pass
 
-    diagnostics = diagnose_transition_drift(
+    before_diagnostics = diagnose_transition_drift(
         TrackDeck.from_features(outgoing_features).timeline,
         TrackDeck.from_features(incoming_features).timeline,
         plan,
@@ -374,9 +589,12 @@ def _render_transition_preview(
     return TransitionPreviewReport(
         output_path=output_path,
         plan=plan,
-        diagnostics=diagnostics,
+        diagnostics=before_diagnostics,
         sample_rate=sample_rate,
         channels=outgoing_pcm[2],
+        mode=mode,
+        before_diagnostics=before_diagnostics,
+        after_diagnostics=matched_mapping,
     )
 
 
@@ -390,13 +608,16 @@ def render_transition_preview(
     margin_seconds: float = EDGE_MARGIN_SECONDS,
     limit_per_deck: int = MAX_CANDIDATES_PER_DECK,
     transition_bars: int = DEFAULT_TRANSITION_LENGTH_BARS,
+    mode: PreviewMode = "no-stretch",
 ) -> Path:
     """Render a planned two-file transition to a newly-owned local WAV.
 
     Feature analysis is loaded from the same JSON cache shape and location used
     by the application, then the existing ``TrackDeck``, ``plan_transition``
     and ``execute_transition`` implementations do all planning and mixing.
-    No source file is modified.  The output must be a distinct ``.wav`` path.
+    The default ``no-stretch`` mode preserves the Phase 4C source mapping;
+    ``bpm-matched`` transforms only the incoming transition window. No source
+    file is modified. The output must be a distinct ``.wav`` path.
 
     Raises:
         NoTransitionPlanError: if the planner returns no plan.
@@ -411,6 +632,7 @@ def render_transition_preview(
         margin_seconds=margin_seconds,
         limit_per_deck=limit_per_deck,
         transition_bars=transition_bars,
+        mode=mode,
     ).output_path
 
 
@@ -428,29 +650,54 @@ def format_preview_summary(report: TransitionPreviewReport) -> str:
     initial = _signed(diagnostics.initial_alignment_beat_fraction, "beats")
     if diagnostics.initial_alignment_beat_fraction is None:
         initial += " (one or both anchors are virtual)"
-    return "\n".join(
-        (
-            f"wrote: {report.output_path}",
-            "plan: "
-            f"{plan.outgoing_track} @ {plan.outgoing_time:.3f}s "
-            f"(bar {plan.outgoing_bar_index}) -> "
-            f"{plan.incoming_track} @ {plan.incoming_time:.3f}s "
-            f"(bar {plan.incoming_bar_index}); "
-            f"{plan.transition_length_bars} bars, "
-            f"{diagnostics.transition_duration_seconds:.3f}s executable",
-            "drift (no time-stretch): "
-            f"end {_signed(diagnostics.predicted_end_drift_seconds, 's')} "
-            f"({_signed(diagnostics.predicted_end_drift_outgoing_beats, 'outgoing beats')}; "
-            f"{_signed(diagnostics.predicted_end_drift_incoming_beats, 'incoming beats')}); "
-            f"initial anchor phase {initial}",
-            "PCM policy: "
-            f"{report.sample_rate} Hz, {report.channels} channel(s); both sources "
-            "must match in sample rate and channel count; no resampling or "
-            "channel conversion is performed",
-            "limits: source frames advance one-for-one, the shortest planned "
-            "window wins, and the preview does not beat-realign or time-stretch",
+    lines = [
+        f"wrote: {report.output_path}",
+        f"mode: {report.mode}",
+        "plan: "
+        f"{plan.outgoing_track} @ {plan.outgoing_time:.3f}s "
+        f"(bar {plan.outgoing_bar_index}) -> "
+        f"{plan.incoming_track} @ {plan.incoming_time:.3f}s "
+        f"(bar {plan.incoming_bar_index}); "
+        f"{plan.transition_length_bars} bars, "
+        f"{diagnostics.transition_duration_seconds:.3f}s executable",
+        "drift (no time-stretch): "
+        f"end {_signed(diagnostics.predicted_end_drift_seconds, 's')} "
+        f"({_signed(diagnostics.predicted_end_drift_outgoing_beats, 'outgoing beats')}; "
+        f"{_signed(diagnostics.predicted_end_drift_incoming_beats, 'incoming beats')}); "
+        f"initial anchor phase {initial}",
+        "PCM policy: "
+        f"{report.sample_rate} Hz, {report.channels} channel(s); both sources "
+        "must match in sample rate and channel count; no resampling or "
+        "channel conversion is performed",
+    ]
+    if report.mode == "bpm-matched":
+        assert report.after_diagnostics is not None
+        matched = report.after_diagnostics
+        lines.extend(
+            (
+                "drift (BPM-matched sample mapping): "
+                f"residual end {_signed(matched.residual_end_drift_seconds, 's')} "
+                f"({_signed(matched.residual_end_drift_outgoing_beats, 'outgoing beats')}); "
+                f"incoming window {matched.source_sample_count} -> "
+                f"{matched.transformed_sample_count} samples at "
+                f"{matched.incoming_playback_rate:.6f}x",
+                "BPM-match policy: pitch-preserving incoming-window transform only; "
+                f"playback rate must remain within the inclusive range "
+                f"[{SUPPORTED_PLAYBACK_RATE_MIN}, {SUPPORTED_PLAYBACK_RATE_MAX}]; "
+                "anchor phase is unchanged and semantic alignment is not claimed",
+            )
         )
-    )
+        lines.append(
+            "limits: outgoing source frames remain one-for-one; only the incoming "
+            "transition window is transformed, and sample mapping is not beat or "
+            "semantic re-alignment"
+        )
+    else:
+        lines.append(
+            "limits: source frames advance one-for-one, the shortest planned "
+            "window wins, and the preview does not beat-realign or time-stretch"
+        )
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -472,6 +719,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="re-run analysis instead of using a valid cached feature file",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("no-stretch", "bpm-matched"),
+        default="no-stretch",
+        help="incoming timing mode (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--bpm-match",
+        dest="mode",
+        action="store_const",
+        const="bpm-matched",
+        help="shortcut for --mode bpm-matched",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -484,6 +744,7 @@ def main(argv: list[str] | None = None) -> int:
             margin_seconds=EDGE_MARGIN_SECONDS,
             limit_per_deck=MAX_CANDIDATES_PER_DECK,
             transition_bars=DEFAULT_TRANSITION_LENGTH_BARS,
+            mode=args.mode,
         )
     except FileNotFoundError as exc:
         print(f"FileNotFoundError: {exc}", file=sys.stderr)
@@ -504,6 +765,9 @@ preview_transition = render_transition_preview
 __all__ = [
     "IncompatiblePCMError",
     "NoTransitionPlanError",
+    "PreviewMode",
+    "TransitionMappingDiagnostics",
+    "TransitionPreviewDiagnostics",
     "TransitionPreviewReport",
     "TransitionPreviewError",
     "format_preview_summary",

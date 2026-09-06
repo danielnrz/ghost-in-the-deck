@@ -850,6 +850,21 @@ correct the initial anchor phase, re-align beats, or stretch either source.
 With unequal tempos, that drift is an expected diagnostic and may be audible;
 the preview does not claim beat synchronisation.
 
+An explicit BPM-matched preview is also available for the offline path:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.transition_preview \
+  --mode bpm-matched path/to/outgoing.wav path/to/incoming.wav out/transition-preview.wav
+```
+
+This mode transforms only the incoming transition window with the documented
+pitch-preserving material path. Its playback-rate policy is inclusive from
+`0.5` through `2.0`; requests outside that range fail instead of changing the
+target. The summary retains the no-stretch drift as the before value and adds
+the residual whole-sample mapping after the transform. It does not change cue
+anchors, re-align beat phase, or claim semantic synchronization. `--bpm-match`
+is a shortcut for `--mode bpm-matched`.
+
 Generated test audio is created under pytest temporary directories. Private
 tracks belong in `testMusic/`, whose contents are ignored, and previews,
 analysis caches, and other generated outputs belong under `out/`, which is also
