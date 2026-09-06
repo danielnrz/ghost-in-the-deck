@@ -226,7 +226,7 @@ def _validated_paths(
         raise FileNotFoundError(outgoing_path)
     if not incoming_path.is_file():
         raise FileNotFoundError(incoming_path)
-    if outgoing_path.resolve() == incoming_path.resolve():
+    if _paths_alias(outgoing_path, incoming_path):
         raise TransitionPreviewError(
             "outgoing and incoming sources must be distinct files"
         )

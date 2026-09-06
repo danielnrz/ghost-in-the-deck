@@ -289,6 +289,26 @@ def test_preview_rejects_output_hardlink_to_source_without_artifacts(tmp_path: P
     assert not (tmp_path / "analysis").exists()
 
 
+def test_preview_rejects_hardlinked_input_sources_without_artifacts(tmp_path: Path):
+    outgoing = make_beat_track(tmp_path / "outgoing.wav", seconds=40.0)
+    incoming = tmp_path / "incoming.wav"
+    incoming.hardlink_to(outgoing)
+
+    with pytest.raises(
+        transition_preview.TransitionPreviewError,
+        match="sources must be distinct",
+    ):
+        render_transition_preview(
+            outgoing,
+            incoming,
+            tmp_path / "preview.wav",
+            analysis_dir=tmp_path / "analysis",
+        )
+
+    assert not (tmp_path / "analysis").exists()
+    assert not (tmp_path / "preview.wav").exists()
+
+
 def test_safe_analysis_directory_is_accepted_by_writable_path_preflight(
     tmp_path: Path,
 ):
