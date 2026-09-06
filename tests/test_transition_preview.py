@@ -222,3 +222,91 @@ def test_preview_cleans_unique_temp_file_after_write_failure(
 
     assert not output.exists()
     assert list(tmp_path.glob(".preview.wav.*.partial")) == []
+
+
+def test_feature_cache_path_cannot_alias_incoming_source(tmp_path: Path):
+    outgoing = make_beat_track(tmp_path / "outgoing.wav", bpm=120.0, seconds=40.0)
+    incoming_wav = make_beat_track(
+        tmp_path / "incoming.wav", bpm=90.0, seconds=40.0
+    )
+    analysis_dir = tmp_path / "analysis"
+    cache_path = transition_preview._feature_cache_path(outgoing, analysis_dir)
+    cache_path.parent.mkdir()
+    incoming_wav.rename(cache_path)
+    incoming_before = cache_path.read_bytes()
+    output = tmp_path / "preview.wav"
+
+    with pytest.raises(
+        transition_preview.TransitionPreviewError,
+        match="generated feature-cache path must not alias an input source",
+    ):
+        render_transition_preview(
+            outgoing, cache_path, output, analysis_dir=analysis_dir
+        )
+
+    assert cache_path.read_bytes() == incoming_before
+    assert not output.exists()
+    assert sorted(path.name for path in analysis_dir.iterdir()) == [cache_path.name]
+
+
+def test_preview_rejects_output_symlink_to_source_without_artifacts(tmp_path: Path):
+    outgoing = make_beat_track(tmp_path / "outgoing.wav", seconds=40.0)
+    incoming = make_beat_track(tmp_path / "incoming.wav", seconds=40.0)
+    output = tmp_path / "preview.wav"
+    output.symlink_to(outgoing)
+    outgoing_before = outgoing.read_bytes()
+
+    with pytest.raises(
+        transition_preview.TransitionPreviewError,
+        match="output must not replace a source",
+    ):
+        render_transition_preview(
+            outgoing, incoming, output, analysis_dir=tmp_path / "analysis"
+        )
+
+    assert outgoing.read_bytes() == outgoing_before
+    assert output.is_symlink()
+    assert not (tmp_path / "analysis").exists()
+
+
+def test_preview_rejects_output_hardlink_to_source_without_artifacts(tmp_path: Path):
+    outgoing = make_beat_track(tmp_path / "outgoing.wav", seconds=40.0)
+    incoming = make_beat_track(tmp_path / "incoming.wav", seconds=40.0)
+    output = tmp_path / "preview.wav"
+    output.hardlink_to(outgoing)
+    outgoing_before = outgoing.read_bytes()
+
+    with pytest.raises(
+        transition_preview.TransitionPreviewError,
+        match="output must not replace a source",
+    ):
+        render_transition_preview(
+            outgoing, incoming, output, analysis_dir=tmp_path / "analysis"
+        )
+
+    assert outgoing.read_bytes() == outgoing_before
+    assert output.read_bytes() == outgoing_before
+    assert not (tmp_path / "analysis").exists()
+
+
+def test_safe_analysis_directory_is_accepted_by_writable_path_preflight(
+    tmp_path: Path,
+):
+    outgoing = tmp_path / "outgoing.wav"
+    incoming = tmp_path / "incoming.wav"
+    outgoing.write_bytes(b"outgoing")
+    incoming.write_bytes(b"incoming")
+    cache_dir = tmp_path / "safe" / "analysis"
+    output = tmp_path / "preview.wav"
+
+    validated = transition_preview._validated_paths(outgoing, incoming, output)
+    cache_paths = transition_preview._validate_writable_paths(
+        *validated, cache_dir
+    )
+
+    assert cache_paths == (
+        transition_preview._feature_cache_path(outgoing, cache_dir),
+        transition_preview._feature_cache_path(incoming, cache_dir),
+    )
+    assert not cache_dir.exists()
+    assert not output.exists()
