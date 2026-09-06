@@ -78,6 +78,71 @@ def _feature_cache_path(track: Path, cache_dir: Path) -> Path:
     return cache_dir / f"{track.stem}-{identity_digest}.json"
 
 
+def _paths_alias(left: Path, right: Path) -> bool:
+    """Return whether two paths identify the same existing or future file."""
+    if left.resolve() == right.resolve():
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+
+
+def _validate_writable_paths(
+    outgoing_path: Path,
+    incoming_path: Path,
+    output_path: Path,
+    analysis_dir: PathLike,
+) -> tuple[Path, Path]:
+    """Validate every generated path before any cache or output write.
+
+    Cache paths are caller-influenced through ``analysis_dir``.  They therefore
+    need the same source-preservation checks as the public preview path,
+    including existing hardlink aliases that cannot be detected by resolution
+    alone.
+    """
+    cache_dir = Path(analysis_dir)
+    if cache_dir.exists() and not cache_dir.is_dir():
+        raise TransitionPreviewError(
+            f"analysis_dir must be a directory path: {cache_dir}"
+        )
+
+    cache_paths = (
+        _feature_cache_path(outgoing_path, cache_dir),
+        _feature_cache_path(incoming_path, cache_dir),
+    )
+    source_paths = (outgoing_path, incoming_path)
+    for source in source_paths:
+        if _paths_alias(output_path, source):
+            raise TransitionPreviewError(
+                "transition preview output must not replace a source file"
+            )
+        if _paths_alias(cache_dir, source):
+            raise TransitionPreviewError(
+                "analysis_dir must not alias an input source file"
+            )
+    if _paths_alias(cache_dir, output_path):
+        raise TransitionPreviewError(
+            "analysis_dir must not alias the preview output"
+        )
+
+    if _paths_alias(cache_paths[0], cache_paths[1]):
+        raise TransitionPreviewError(
+            "generated feature-cache paths must be distinct files"
+        )
+    for cache_path in cache_paths:
+        if _paths_alias(cache_path, output_path):
+            raise TransitionPreviewError(
+                "generated feature-cache path must not alias the preview output"
+            )
+        for source in source_paths:
+            if _paths_alias(cache_path, source):
+                raise TransitionPreviewError(
+                    "generated feature-cache path must not alias an input source"
+                )
+    return cache_paths
+
+
 def _cached_features(track: Path, cache_dir: Path, refresh: bool) -> MusicFeatures:
     """Load or create the established JSON ``MusicFeatures`` cache entry."""
     cached = _feature_cache_path(track, cache_dir)
@@ -167,7 +232,9 @@ def _validated_paths(
         )
     if output_path.suffix.lower() != ".wav":
         raise TransitionPreviewError("transition preview output must be a .wav file")
-    if output_path.resolve() in {outgoing_path.resolve(), incoming_path.resolve()}:
+    if _paths_alias(output_path, outgoing_path) or _paths_alias(
+        output_path, incoming_path
+    ):
         raise TransitionPreviewError(
             "transition preview output must not replace a source file"
         )
@@ -219,6 +286,9 @@ def _render_transition_preview(
     """Render once and retain the exact plan used for the CLI report."""
     outgoing_path, incoming_path, output_path = _validated_paths(
         outgoing_source, incoming_source, output_wav
+    )
+    _validate_writable_paths(
+        outgoing_path, incoming_path, output_path, analysis_dir
     )
     outgoing_features, incoming_features, plan = _build_plan(
         outgoing_path,
