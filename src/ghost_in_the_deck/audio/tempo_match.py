@@ -42,6 +42,11 @@ if TYPE_CHECKING:
 SUPPORTED_PLAYBACK_RATE_MIN = 0.80
 SUPPORTED_PLAYBACK_RATE_MAX = 1.25
 
+# Rubber Band needs a short non-silent lookahead to flush the end of a finite
+# input window.  Without it, the ffmpeg filter can return tens of milliseconds
+# fewer frames than the requested wall-clock window.
+_RUBBERBAND_LOOKAHEAD_SECONDS = 0.25
+
 
 def _validate_number(value: object, name: str, *, positive: bool = False) -> float:
     description = "positive" if positive else "non-negative"
@@ -200,11 +205,46 @@ def _rubberband_transform(
     channels: int,
     tempo: float,
     output_sample_count: int,
+    lookahead: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Run the local pitch-neutral Rubber Band filter on one PCM window."""
+    """Run the local pitch-neutral Rubber Band filter on one PCM window.
+
+    A finite filter input needs deterministic non-silent lookahead so the
+    backend can flush its final analysis blocks.  The lookahead is never
+    returned: only the requested transformed window belongs to the result.
+    """
     executable = shutil.which("ffmpeg")
     if executable is None:
         raise RuntimeError("ffmpeg with the rubberband filter is required")
+
+    flush_lookahead_count = max(
+        1, math.ceil(sample_rate * _RUBBERBAND_LOOKAHEAD_SECONDS)
+    )
+    # The plan's outgoing duration is authoritative even for a manually
+    # constructed plan whose BPM/duration fields are not algebraically paired.
+    # Supply enough continuation for the requested output first, then add the
+    # backend flush margin.
+    required_input_count = math.ceil(output_sample_count * tempo)
+    lookahead_count = max(
+        flush_lookahead_count,
+        required_input_count - material.shape[0] + flush_lookahead_count,
+    )
+    continuation = np.empty((lookahead_count, channels), dtype=np.float64)
+    supplied = 0
+    if lookahead is not None:
+        if lookahead.ndim != 2 or lookahead.shape[1] != channels:
+            raise ValueError("rubberband lookahead has an incompatible channel shape")
+        supplied = min(lookahead.shape[0], lookahead_count)
+        continuation[:supplied] = lookahead[:supplied]
+    if supplied < lookahead_count:
+        # A source is allowed to end exactly at its transition window.  A
+        # repeated tail is deterministic and keeps the backend flush material
+        # non-silent without inventing zero padding at the audible boundary.
+        tail = material[-min(material.shape[0], lookahead_count) :]
+        repetitions = math.ceil((lookahead_count - supplied) / tail.shape[0])
+        repeated = np.tile(tail, (repetitions, 1))
+        continuation[supplied:] = repeated[: lookahead_count - supplied]
+    filter_material = np.concatenate((material, continuation), axis=0)
 
     # Raw float PCM keeps this boundary independent of file codecs and gives
     # the filter no opportunity to replace or rewrite either source file.
@@ -238,7 +278,7 @@ def _rubberband_transform(
     try:
         completed = subprocess.run(
             command,
-            input=np.ascontiguousarray(material, dtype=np.float64).tobytes(),
+            input=np.ascontiguousarray(filter_material, dtype=np.float64).tobytes(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,
@@ -258,14 +298,13 @@ def _rubberband_transform(
     if not np.all(np.isfinite(transformed)):
         raise RuntimeError("rubberband returned non-finite PCM")
 
-    # Rubber Band's block tail can differ by a frame across versions.  The
-    # contract owns the final sample count, so trim or zero-pad only at the
-    # transformed window's tail.
-    if transformed.shape[0] >= output_sample_count:
-        return np.array(transformed[:output_sample_count], dtype=np.float64, copy=True)
-    padded = np.zeros((output_sample_count, channels), dtype=np.float64)
-    padded[: transformed.shape[0]] = transformed
-    return padded
+    if transformed.shape[0] < output_sample_count:
+        raise RuntimeError(
+            "rubberband produced "
+            f"{transformed.shape[0]} frames for a {output_sample_count}-frame "
+            "window even after deterministic lookahead"
+        )
+    return np.array(transformed[:output_sample_count], dtype=np.float64, copy=True)
 
 
 def stretch_incoming_transition(
@@ -308,12 +347,18 @@ def stretch_incoming_transition(
     if match.incoming_playback_rate == 1.0 and source_count == output_count:
         transformed = np.array(material, dtype=np.float64, copy=True)
     else:
+        lookahead = pcm[end : end + max(
+            1, math.ceil(match.sample_rate * _RUBBERBAND_LOOKAHEAD_SECONDS)
+        )]
+        if was_mono:
+            lookahead = lookahead[:, None]
         transformed = _rubberband_transform(
             material,
             sample_rate=match.sample_rate,
             channels=channels,
             tempo=match.incoming_playback_rate,
             output_sample_count=output_count,
+            lookahead=lookahead,
         )
     prefix = pcm[:anchor, None] if was_mono else pcm[:anchor]
     suffix = pcm[end:, None] if was_mono else pcm[end:]

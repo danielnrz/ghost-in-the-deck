@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from ghost_in_the_deck.audio.tempo_match import stretch_incoming_transition
@@ -77,3 +79,23 @@ def test_transform_is_repeatable_for_same_pcm_and_plan():
     second = stretch_incoming_transition(source, plan, SAMPLE_RATE)
 
     np.testing.assert_array_equal(first, second)
+
+
+def test_long_supported_window_does_not_end_in_rubberband_padding_silence():
+    sample_rate = 48_000
+    plan = _plan(bpm_a=120.0, bpm_b=150.0)
+    plan = replace(
+        plan,
+        incoming_time=0.0,
+        incoming_duration_seconds=12.8,
+        outgoing_duration_seconds=16.0,
+    )
+    timeline = np.arange(round(12.8 * sample_rate), dtype=np.float64) / sample_rate
+    source = np.sin(2.0 * np.pi * 440.0 * timeline)
+
+    result = stretch_incoming_transition(source, plan, sample_rate)
+    transformed = result[-round(16.0 * sample_rate) :]
+    tail = transformed[-round(0.02 * sample_rate) :]
+
+    assert transformed.shape == (round(16.0 * sample_rate),)
+    assert np.sqrt(np.mean(tail**2)) > 0.2
