@@ -4,7 +4,8 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 4B**.
+This repository is currently at **Phase 4C**: an offline two-file transition
+preview built on the frozen Phase 4B PCM executor.
 
 ## Phase 0 scope
 
@@ -814,11 +815,13 @@ Phase 4B therefore proves the numerical transition primitive only. Live
 playback wiring, beat-aware alignment, time-stretching, EQ, key matching,
 playlist orchestration and avatar choreography remain later-phase work.
 
-## Offline two-file transition preview
+## Offline two-file transition preview (Phase 4C)
 
-The file-level preview joins the established analysis cache, `TrackDeck` /
-`TransitionPlan` planner, and the Phase 4B PCM executor. It accepts two local
-audio paths and a destination WAV:
+Phase 4C joins the established analysis cache, `TrackDeck` / `TransitionPlan`
+planner, the Phase 4B PCM executor, and a no-time-stretch drift report. It is
+an offline file-level preview only: it does not wire the transition into the
+live application, and it does not add a second mixer implementation. It
+accepts two local audio paths and a destination WAV:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.transition_preview \
@@ -844,6 +847,14 @@ sample rate, both source clocks advance by the same elapsed seconds, and the
 shorter planned window determines the output length. The reported end drift is
 the signed tempo-only separation predicted over that window; it does not
 correct the initial anchor phase, re-align beats, or stretch either source.
+With unequal tempos, that drift is an expected diagnostic and may be audible;
+the preview does not claim beat synchronisation.
+
+Generated test audio is created under pytest temporary directories. Private
+tracks belong in `testMusic/`, whose contents are ignored, and previews,
+analysis caches, and other generated outputs belong under `out/`, which is also
+ignored. Neither private audio nor generated preview files are part of the
+repository.
 
 ## Tests
 
@@ -942,11 +953,19 @@ anchors, equal-elapsed-time absolute mappings, deterministic sample counts,
 shortest-window execution without stretching, endpoint-owned linear gains,
 independent mono and stereo channel mixing, invalid-input rejection, and
 source/result memory independence. The focused two-deck and single-track
-regression command is:
+regression command, including the Phase 4C preview and drift checks, is:
 
 ```bash
-cd /home/daniel/Documents/Programming/ghost-in-the-deck && PYTHONPATH=src:tests DISPLAY=:1 .venv/bin/python -m pytest tests/test_transition_mixer.py tests/test_transition.py tests/test_deck.py tests/test_dj_planner.py tests/test_dj_behavior.py tests/test_musical_structure.py tests/test_review_fixes.py -q
+cd /home/daniel/Documents/Programming/ghost-in-the-deck && PYTHONPATH=src:tests DISPLAY=:1 .venv/bin/python -m pytest tests/test_transition_preview.py tests/test_transition_diagnostics.py tests/test_transition_mixer.py tests/test_transition.py tests/test_deck.py tests/test_dj_planner.py tests/test_dj_behavior.py tests/test_musical_structure.py tests/test_review_fixes.py -q
 ```
+
+`test_transition_preview.py` uses only generated synthetic tracks to prove
+deterministic owned WAV output, PCM16 format, source-file immutability, reuse
+of the Phase 4B executor, the end-to-end signed drift report, and the explicit
+no-plan failure. `test_transition_diagnostics.py` checks the same drift model
+against synthetic beat grids, including equal tempos, differing tempos, and
+virtual anchors. The Phase 4B boundary remains frozen: no live playback,
+beat re-alignment, resampling, or time-stretching is implied by this preview.
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 
@@ -1028,9 +1047,9 @@ Two format notes, both learned the hard way:
   in any semantic sense: the walk is the same fixed bar grid, there are no
   verse / chorus / drop / breakdown labels, `phrase_position` is an assumed
   eight-bar cycle that drives no decision, and the `MIN_GAP_BARS` spacing and
-  past-track-end drop are unchanged. Offline two-track crossfading is now
-  implemented by the Phase 4B executor; live playback wiring remains future
-  work.
+  past-track-end drop are unchanged. Offline two-track crossfading is
+  implemented by the Phase 4B executor, and Phase 4C supplies the file-level
+  preview around it; live playback wiring remains future work.
 - Bars are assumed to be four beats. A track in another metre still grooves,
   and gestures still land on a bar boundary, but the wrong one.
 - Before the first detected beat and after the last, the beat grid is
