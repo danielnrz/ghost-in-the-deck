@@ -59,6 +59,15 @@ def test_complete_source_span_maps_to_exact_transformed_endpoint(
     assert mapping.map_source_span(source_span) == transformed_span
 
 
+def test_interior_boundary_mapping_does_not_floor_exact_ratio_early():
+    mapping = TransformedSampleMapping(
+        source_span=SampleSpan(0, 88796),
+        transformed_span=SampleSpan(0, 97188),
+    )
+
+    assert mapping.map_source_span(SampleSpan(0, 44398)) == SampleSpan(0, 48594)
+
+
 def test_signed_phase_offset_and_initial_correction_use_transformed_mapping():
     outgoing = anchor_cue(_timeline([1.24]), cue_index=0, sample_rate=10)
     incoming = anchor_cue(_timeline([2.36]), cue_index=0, sample_rate=10)
