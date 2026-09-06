@@ -814,6 +814,37 @@ Phase 4B therefore proves the numerical transition primitive only. Live
 playback wiring, beat-aware alignment, time-stretching, EQ, key matching,
 playlist orchestration and avatar choreography remain later-phase work.
 
+## Offline two-file transition preview
+
+The file-level preview joins the established analysis cache, `TrackDeck` /
+`TransitionPlan` planner, and the Phase 4B PCM executor. It accepts two local
+audio paths and a destination WAV:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.transition_preview \
+  path/to/outgoing.wav path/to/incoming.wav out/transition-preview.wav
+```
+
+Use `--refresh` to replace valid cached feature JSON, or `--analysis-dir` to
+choose another cache directory. On success the command writes the WAV and
+prints the selected cue bars, executable duration, BPM-derived end drift, and
+the initial anchor phase when both anchors are detected beats. Missing files,
+an unavailable plan, failed decoding, and incompatible PCM are reported on
+stderr with a non-zero exit status; the source files are never overwritten.
+
+The preview's PCM compatibility policy is intentionally explicit: after each
+source passes through the existing `to_wav` helper, both decoded buffers must
+be non-empty finite PCM with the same sample rate and channel count. The
+preview itself performs no resampling, channel conversion, or other general
+format conversion. `to_wav` may still use its established ffmpeg decode path
+for a non-WAV source; that is not a preview-side compatibility fallback.
+
+There is no time-stretching. Source frames advance one-for-one at the shared
+sample rate, both source clocks advance by the same elapsed seconds, and the
+shorter planned window determines the output length. The reported end drift is
+the signed tempo-only separation predicted over that window; it does not
+correct the initial anchor phase, re-align beats, or stretch either source.
+
 ## Tests
 
 ```bash

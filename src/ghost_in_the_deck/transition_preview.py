@@ -8,7 +8,11 @@ the eventual UI.
 
 from __future__ import annotations
 
+import argparse
 import json
+import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
@@ -19,6 +23,7 @@ from .audio.decode import to_wav
 from .audio.features import SCHEMA_VERSION, MusicFeatures
 from .audio.mixer import execute_transition
 from .deck import TrackDeck
+from .transition_diagnostics import TransitionDiagnostics, diagnose_transition_drift
 from .transition import (
     DEFAULT_TRANSITION_LENGTH_BARS,
     EDGE_MARGIN_SECONDS,
@@ -34,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ANALYSIS_DIR = ROOT / "out" / "analysis"
 
 
-class TransitionPreviewError(RuntimeError):
+class TransitionPreviewError(ValueError):
     """Base error for a preview that cannot be rendered."""
 
 
@@ -44,6 +49,17 @@ class NoTransitionPlanError(TransitionPreviewError):
 
 class IncompatiblePCMError(TransitionPreviewError):
     """The two decoded sources cannot satisfy the Phase 4B PCM contract."""
+
+
+@dataclass(frozen=True)
+class TransitionPreviewReport:
+    """The plan and diagnostics belonging to one written preview WAV."""
+
+    output_path: Path
+    plan: TransitionPlan
+    diagnostics: TransitionDiagnostics
+    sample_rate: int
+    channels: int
 
 
 def _cached_features(track: Path, cache_dir: Path, refresh: bool) -> MusicFeatures:
@@ -70,7 +86,7 @@ def _load_pcm(source: Path) -> tuple[np.ndarray, int, int]:
     """Decode one source and return owned float PCM, rate and channel count."""
     try:
         wav = to_wav(source)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         raise IncompatiblePCMError(
             f"could not decode {source} into PCM WAV for the transition preview"
         ) from exc
@@ -116,28 +132,12 @@ def _validate_compatible_pcm(
     return outgoing_rate
 
 
-def render_transition_preview(
+def _validated_paths(
     outgoing_source: PathLike,
     incoming_source: PathLike,
     output_wav: PathLike,
-    *,
-    refresh: bool = False,
-    analysis_dir: PathLike = ANALYSIS_DIR,
-    margin_seconds: float = EDGE_MARGIN_SECONDS,
-    limit_per_deck: int = MAX_CANDIDATES_PER_DECK,
-    transition_bars: int = DEFAULT_TRANSITION_LENGTH_BARS,
-) -> Path:
-    """Render a planned two-file transition to a newly-owned local WAV.
-
-    Feature analysis is loaded from the same JSON cache shape and location used
-    by the application, then the existing ``TrackDeck``, ``plan_transition``
-    and ``execute_transition`` implementations do all planning and mixing.
-    No source file is modified.  The output must be a distinct ``.wav`` path.
-
-    Raises:
-        NoTransitionPlanError: if the planner returns no plan.
-        IncompatiblePCMError: if decoding or the shared PCM contract fails.
-    """
+) -> tuple[Path, Path, Path]:
+    """Validate local source/output paths before analysis or PCM work."""
     outgoing_path = Path(outgoing_source)
     incoming_path = Path(incoming_source)
     output_path = Path(output_wav)
@@ -146,12 +146,29 @@ def render_transition_preview(
     if not incoming_path.is_file():
         raise FileNotFoundError(incoming_path)
     if outgoing_path.resolve() == incoming_path.resolve():
-        raise TransitionPreviewError("outgoing and incoming sources must be distinct files")
+        raise TransitionPreviewError(
+            "outgoing and incoming sources must be distinct files"
+        )
     if output_path.suffix.lower() != ".wav":
         raise TransitionPreviewError("transition preview output must be a .wav file")
     if output_path.resolve() in {outgoing_path.resolve(), incoming_path.resolve()}:
-        raise TransitionPreviewError("transition preview output must not replace a source file")
+        raise TransitionPreviewError(
+            "transition preview output must not replace a source file"
+        )
+    return outgoing_path, incoming_path, output_path
 
+
+def _build_plan(
+    outgoing_path: Path,
+    incoming_path: Path,
+    *,
+    refresh: bool,
+    analysis_dir: PathLike,
+    margin_seconds: float,
+    limit_per_deck: int,
+    transition_bars: int,
+) -> tuple[MusicFeatures, MusicFeatures, TransitionPlan]:
+    """Load cached features and select the established best transition plan."""
     cache_path = Path(analysis_dir)
     outgoing_features = _cached_features(outgoing_path, cache_path, refresh)
     incoming_features = _cached_features(incoming_path, cache_path, refresh)
@@ -159,7 +176,7 @@ def render_transition_preview(
         TrackDeck.from_features(outgoing_features),
         TrackDeck.from_features(incoming_features),
     )
-    plan: TransitionPlan | None = plan_transition(
+    plan = plan_transition(
         context,
         margin_seconds=margin_seconds,
         limit_per_deck=limit_per_deck,
@@ -169,6 +186,33 @@ def render_transition_preview(
         raise NoTransitionPlanError(
             "no transition plan exists for the supplied outgoing and incoming tracks"
         )
+    return outgoing_features, incoming_features, plan
+
+
+def _render_transition_preview(
+    outgoing_source: PathLike,
+    incoming_source: PathLike,
+    output_wav: PathLike,
+    *,
+    refresh: bool,
+    analysis_dir: PathLike,
+    margin_seconds: float,
+    limit_per_deck: int,
+    transition_bars: int,
+) -> TransitionPreviewReport:
+    """Render once and retain the exact plan used for the CLI report."""
+    outgoing_path, incoming_path, output_path = _validated_paths(
+        outgoing_source, incoming_source, output_wav
+    )
+    outgoing_features, incoming_features, plan = _build_plan(
+        outgoing_path,
+        incoming_path,
+        refresh=refresh,
+        analysis_dir=analysis_dir,
+        margin_seconds=margin_seconds,
+        limit_per_deck=limit_per_deck,
+        transition_bars=transition_bars,
+    )
 
     outgoing_pcm = _load_pcm(outgoing_path)
     incoming_pcm = _load_pcm(incoming_path)
@@ -205,7 +249,135 @@ def render_transition_preview(
         raise TransitionPreviewError(
             f"could not write transition preview WAV {output_path}"
         ) from exc
-    return output_path
+
+    diagnostics = diagnose_transition_drift(
+        TrackDeck.from_features(outgoing_features).timeline,
+        TrackDeck.from_features(incoming_features).timeline,
+        plan,
+    )
+    return TransitionPreviewReport(
+        output_path=output_path,
+        plan=plan,
+        diagnostics=diagnostics,
+        sample_rate=sample_rate,
+        channels=outgoing_pcm[2],
+    )
+
+
+def render_transition_preview(
+    outgoing_source: PathLike,
+    incoming_source: PathLike,
+    output_wav: PathLike,
+    *,
+    refresh: bool = False,
+    analysis_dir: PathLike = ANALYSIS_DIR,
+    margin_seconds: float = EDGE_MARGIN_SECONDS,
+    limit_per_deck: int = MAX_CANDIDATES_PER_DECK,
+    transition_bars: int = DEFAULT_TRANSITION_LENGTH_BARS,
+) -> Path:
+    """Render a planned two-file transition to a newly-owned local WAV.
+
+    Feature analysis is loaded from the same JSON cache shape and location used
+    by the application, then the existing ``TrackDeck``, ``plan_transition``
+    and ``execute_transition`` implementations do all planning and mixing.
+    No source file is modified.  The output must be a distinct ``.wav`` path.
+
+    Raises:
+        NoTransitionPlanError: if the planner returns no plan.
+        IncompatiblePCMError: if decoding or the shared PCM contract fails.
+    """
+    return _render_transition_preview(
+        outgoing_source,
+        incoming_source,
+        output_wav,
+        refresh=refresh,
+        analysis_dir=analysis_dir,
+        margin_seconds=margin_seconds,
+        limit_per_deck=limit_per_deck,
+        transition_bars=transition_bars,
+    ).output_path
+
+
+def _signed(value: float | None, unit: str) -> str:
+    """Format an optional signed diagnostic value for the CLI."""
+    if value is None:
+        return "unavailable"
+    return f"{value:+.3f} {unit}"
+
+
+def format_preview_summary(report: TransitionPreviewReport) -> str:
+    """Return the concise plan, drift, and compatibility summary."""
+    plan = report.plan
+    diagnostics = report.diagnostics
+    initial = _signed(diagnostics.initial_alignment_beat_fraction, "beats")
+    if diagnostics.initial_alignment_beat_fraction is None:
+        initial += " (one or both anchors are virtual)"
+    return "\n".join(
+        (
+            f"wrote: {report.output_path}",
+            "plan: "
+            f"{plan.outgoing_track} @ {plan.outgoing_time:.3f}s "
+            f"(bar {plan.outgoing_bar_index}) -> "
+            f"{plan.incoming_track} @ {plan.incoming_time:.3f}s "
+            f"(bar {plan.incoming_bar_index}); "
+            f"{plan.transition_length_bars} bars, "
+            f"{diagnostics.transition_duration_seconds:.3f}s executable",
+            "drift (no time-stretch): "
+            f"end {_signed(diagnostics.predicted_end_drift_seconds, 's')} "
+            f"({_signed(diagnostics.predicted_end_drift_outgoing_beats, 'outgoing beats')}; "
+            f"{_signed(diagnostics.predicted_end_drift_incoming_beats, 'incoming beats')}); "
+            f"initial anchor phase {initial}",
+            "PCM policy: "
+            f"{report.sample_rate} Hz, {report.channels} channel(s); both sources "
+            "must match in sample rate and channel count; no resampling or "
+            "channel conversion is performed",
+            "limits: source frames advance one-for-one, the shortest planned "
+            "window wins, and the preview does not beat-realign or time-stretch",
+        )
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Render one offline preview from two local audio paths."""
+    parser = argparse.ArgumentParser(
+        description="Render an offline two-file transition preview as a WAV."
+    )
+    parser.add_argument("outgoing", type=Path, help="outgoing local audio path")
+    parser.add_argument("incoming", type=Path, help="incoming local audio path")
+    parser.add_argument("output", type=Path, help="output .wav path")
+    parser.add_argument(
+        "--analysis-dir",
+        type=Path,
+        default=ANALYSIS_DIR,
+        help="JSON feature-cache directory (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="re-run analysis instead of using a valid cached feature file",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        report = _render_transition_preview(
+            args.outgoing,
+            args.incoming,
+            args.output,
+            refresh=args.refresh,
+            analysis_dir=args.analysis_dir,
+            margin_seconds=EDGE_MARGIN_SECONDS,
+            limit_per_deck=MAX_CANDIDATES_PER_DECK,
+            transition_bars=DEFAULT_TRANSITION_LENGTH_BARS,
+        )
+    except FileNotFoundError as exc:
+        print(f"FileNotFoundError: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_preview_summary(report))
+    return 0
 
 
 # The short name is convenient for callers that already speak in terms of a
@@ -216,7 +388,13 @@ preview_transition = render_transition_preview
 __all__ = [
     "IncompatiblePCMError",
     "NoTransitionPlanError",
+    "TransitionPreviewReport",
     "TransitionPreviewError",
+    "format_preview_summary",
     "preview_transition",
     "render_transition_preview",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
