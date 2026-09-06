@@ -9,6 +9,7 @@ window in which both source clocks advance by the same elapsed amount, and
 from __future__ import annotations
 
 import math
+import numbers
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,16 @@ def _validate_sample_rate(sample_rate: object) -> int:
     if rate <= 0:
         raise ValueError("sample_rate must be a positive integer")
     return rate
+
+
+def _validate_plan_number(value: object, name: str) -> float:
+    """Return a finite plan number, with one ValueError failure contract."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{name} must be a finite non-negative number")
+    number = float(value)
+    if not math.isfinite(number) or number < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return number
 
 
 def _as_float_channels(samples: np.ndarray, name: str) -> tuple[np.ndarray, bool]:
@@ -212,20 +223,27 @@ class TransitionClock:
         rate = _validate_sample_rate(self.sample_rate)
         object.__setattr__(self, "sample_rate", rate)
 
-        for name in ("outgoing_duration_seconds", "incoming_duration_seconds"):
-            duration = float(getattr(self.plan, name))
-            if not math.isfinite(duration) or duration < 0.0:
-                raise ValueError(f"{name} must be a finite non-negative number")
+        for name in (
+            "outgoing anchor",
+            "incoming anchor",
+            "outgoing_duration_seconds",
+            "incoming_duration_seconds",
+        ):
+            field_name = {
+                "outgoing anchor": "outgoing_time",
+                "incoming anchor": "incoming_time",
+            }.get(name, name)
+            _validate_plan_number(getattr(self.plan, field_name), name)
 
     @property
     def outgoing_anchor_seconds(self) -> float:
         """Absolute source time at the start of the outgoing transition."""
-        return self.plan.outgoing_time
+        return _validate_plan_number(self.plan.outgoing_time, "outgoing anchor")
 
     @property
     def incoming_anchor_seconds(self) -> float:
         """Absolute source time at the start of the incoming transition."""
-        return self.plan.incoming_time
+        return _validate_plan_number(self.plan.incoming_time, "incoming anchor")
 
     @property
     def outgoing_anchor(self) -> float:
@@ -241,8 +259,14 @@ class TransitionClock:
     def executable_duration_seconds(self) -> float:
         """The shortest source window, with no time-stretching."""
         return min(
-            self.plan.outgoing_duration_seconds,
-            self.plan.incoming_duration_seconds,
+            _validate_plan_number(
+                self.plan.outgoing_duration_seconds,
+                "outgoing_duration_seconds",
+            ),
+            _validate_plan_number(
+                self.plan.incoming_duration_seconds,
+                "incoming_duration_seconds",
+            ),
         )
 
     @property
@@ -253,7 +277,10 @@ class TransitionClock:
     @property
     def sample_count(self) -> int:
         """Number of output samples, rounded to the nearest sample half-up."""
-        return math.floor(self.executable_duration_seconds * self.sample_rate + 0.5)
+        sample_position = self.executable_duration_seconds * self.sample_rate
+        if not math.isfinite(sample_position):
+            raise ValueError("transition duration is outside the addressable sample range")
+        return math.floor(sample_position + 0.5)
 
     def _check_elapsed(self, elapsed_seconds: float) -> float:
         elapsed = float(elapsed_seconds)

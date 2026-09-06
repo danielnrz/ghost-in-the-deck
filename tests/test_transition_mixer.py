@@ -104,6 +104,36 @@ def test_sample_rate_must_be_positive_and_finite(sample_rate):
         TransitionClock(_plan(), sample_rate=sample_rate)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("outgoing_time", None),
+        ("incoming_time", None),
+        ("outgoing_duration_seconds", None),
+        ("incoming_duration_seconds", None),
+        ("outgoing_duration_seconds", "2.0"),
+        ("incoming_duration_seconds", "2.0"),
+        ("outgoing_duration_seconds", float("inf")),
+        ("incoming_duration_seconds", float("nan")),
+    ],
+)
+def test_malformed_plan_fields_raise_value_error(field, value):
+    plan = dataclasses.replace(_plan(), **{field: value})
+
+    with pytest.raises(ValueError):
+        TransitionClock(plan, sample_rate=2)
+
+
+def test_sample_count_rejects_duration_rate_overflow():
+    clock = TransitionClock(
+        _plan(outgoing_duration=1e308, incoming_duration=1e308),
+        sample_rate=2,
+    )
+
+    with pytest.raises(ValueError, match="addressable sample range"):
+        _ = clock.sample_count
+
+
 def test_elapsed_mapping_rejects_times_outside_executable_window():
     clock = TransitionClock(_plan(outgoing_duration=4.0, incoming_duration=6.0), 1000)
 
