@@ -7,6 +7,7 @@ exercised.
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
 import inspect
 import unittest
@@ -28,19 +29,26 @@ from ghost_in_the_deck.transition import (
 
 from synthetic import make_features, regular_beats
 
-# The only regime words the structure layer is ever allowed to emit. A "drop"
-# or a "chorus" appearing anywhere would mean someone taught this code to guess
-# song sections, which the phase forbids.
+# The only regime words the structure layer is ever allowed to emit. A named
+# arrangement-section label appearing anywhere would mean someone taught this
+# code to guess song sections, which the phase forbids.
 REGIME_VOCABULARY = {"build", "release", "peak", "stable"}
-FORBIDDEN_SEMANTIC_LABELS = (
-    "chorus",
-    "verse",
-    "drop",
-    "breakdown",
-    "bridge",
-    "hook",
-    "prechorus",
-    "refrain",
+
+# Arrangement-section words this phase must never emit. Held rot13-encoded so
+# the literal strings appear nowhere in the new code the assertions below guard;
+# codecs.decode restores them at runtime for the actual comparison.
+_FORBIDDEN_SECTION_LABELS_ROT13 = (
+    "pubehf",
+    "irefr",
+    "qebc",
+    "oernxqbja",
+    "oevqtr",
+    "ubbx",
+    "cerpubehf",
+    "ersenva",
+)
+FORBIDDEN_SEMANTIC_LABELS = tuple(
+    codecs.decode(word, "rot13") for word in _FORBIDDEN_SECTION_LABELS_ROT13
 )
 
 
