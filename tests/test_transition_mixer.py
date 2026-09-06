@@ -69,10 +69,18 @@ def test_sample_count_is_deterministic_from_duration_and_sample_rate():
 
     assert clock.executable_duration_seconds == 2.345
     assert clock.duration_seconds == 2.345
-    assert clock.sample_count == int(2.345 * 44100)
+    assert clock.sample_count == int(2.345 * 44100 + 0.5)
     assert clock.sample_count == TransitionClock(
         _plan(outgoing_duration=2.345), sample_rate=44100
     ).sample_count
+
+
+def test_sample_count_uses_half_up_quantization():
+    clock = TransitionClock(
+        _plan(outgoing_duration=2.5, incoming_duration=3.5), sample_rate=1
+    )
+
+    assert clock.sample_count == 3
 
 
 def test_unequal_tempo_plan_uses_shortest_window_without_stretching():
@@ -88,7 +96,9 @@ def test_unequal_tempo_plan_uses_shortest_window_without_stretching():
     )
 
 
-@pytest.mark.parametrize("sample_rate", [0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "sample_rate", [0, -1, 1.5, True, "2", float("nan"), float("inf")]
+)
 def test_sample_rate_must_be_positive_and_finite(sample_rate):
     with pytest.raises(ValueError):
         TransitionClock(_plan(), sample_rate=sample_rate)
@@ -103,11 +113,9 @@ def test_elapsed_mapping_rejects_times_outside_executable_window():
         clock.incoming_time_at(clock.duration_seconds + 0.001)
 
 
-def test_linear_crossfade_one_sample_assigns_endpoint_ownership():
-    outgoing, incoming = linear_crossfade_gains(1)
-
-    np.testing.assert_array_equal(outgoing, [1.0])
-    np.testing.assert_array_equal(incoming, [0.0])
+def test_linear_crossfade_requires_distinct_endpoints():
+    with pytest.raises(ValueError, match="at least two"):
+        linear_crossfade_gains(1)
 
 
 def test_linear_crossfade_is_bounded_complementary_and_linear():
@@ -120,9 +128,9 @@ def test_linear_crossfade_is_bounded_complementary_and_linear():
     np.testing.assert_array_equal(outgoing + incoming, np.ones(5))
 
 
-@pytest.mark.parametrize("sample_count", [0, -1, 1.5, "4", True, False])
+@pytest.mark.parametrize("sample_count", [0, -1, 1, 1.5, "4", True, False])
 def test_linear_crossfade_rejects_invalid_sample_counts(sample_count):
-    with pytest.raises(ValueError, match="positive integer"):
+    with pytest.raises(ValueError, match="at least two"):
         linear_crossfade_gains(sample_count)
 
 
@@ -254,15 +262,38 @@ def test_execute_transition_is_deterministic_and_preserves_sources(stereo):
             np.zeros(8),
             _plan(outgoing_duration=0.0, incoming_duration=0.0),
             1,
-            "output sample",
+            "at least two",
         ),
     ],
 )
 def test_execute_transition_rejects_invalid_inputs(
     outgoing, incoming, plan, sample_rate, message
 ):
-    with pytest.raises((TypeError, ValueError), match=message):
+    with pytest.raises(ValueError, match=message):
         execute_transition(outgoing, incoming, plan, sample_rate)
+
+
+def test_execute_transition_rejects_missing_plan_with_value_error():
+    with pytest.raises(ValueError, match="plan must be a TransitionPlan"):
+        execute_transition(np.zeros(8), np.zeros(8), None, sample_rate=1)
+
+
+def test_execute_transition_rounds_anchors_and_duration_half_up():
+    plan = _plan(
+        outgoing_time=2.5,
+        incoming_time=3.5,
+        outgoing_duration=2.5,
+        incoming_duration=4.5,
+    )
+    outgoing = np.arange(8, dtype=np.float64)
+    incoming = np.arange(8, dtype=np.float64) + 100.0
+
+    result = execute_transition(outgoing, incoming, plan, sample_rate=1)
+
+    assert result.shape == (3,)
+    np.testing.assert_allclose(result, [3.0, 54.5, 106.0])
+    assert result[0] == outgoing[3]
+    assert result[-1] == incoming[6]
 
 
 def test_execute_transition_rejects_non_finite_pcm():
