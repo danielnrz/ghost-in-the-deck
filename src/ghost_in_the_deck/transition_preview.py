@@ -25,11 +25,11 @@ from .audio.analysis import analyse
 from .audio.decode import to_wav
 from .audio.features import SCHEMA_VERSION, MusicFeatures
 from .audio.mixer import execute_transition
+from .audio.phase_corrected_material import phase_correct_incoming_transition
 from .audio.tempo_match import (
     SUPPORTED_PLAYBACK_RATE_MAX,
     SUPPORTED_PLAYBACK_RATE_MIN,
     TempoMatch,
-    stretch_incoming_transition,
     tempo_match,
 )
 from .deck import TrackDeck
@@ -505,8 +505,14 @@ def _render_transition_preview(
     if mode == "bpm-matched":
         try:
             match = tempo_match(plan, sample_rate)
-            mixer_incoming = stretch_incoming_transition(
-                incoming_pcm[0], plan, sample_rate
+            outgoing_timeline = TrackDeck.from_features(outgoing_features).timeline
+            incoming_timeline = TrackDeck.from_features(incoming_features).timeline
+            mixer_incoming = phase_correct_incoming_transition(
+                incoming_pcm[0],
+                plan,
+                sample_rate,
+                outgoing_timeline,
+                incoming_timeline,
             )
         except ValueError as exc:
             if "outside the supported range" in str(exc):
@@ -528,7 +534,7 @@ def _render_transition_preview(
             match,
             sample_rate,
             TrackDeck.from_features(outgoing_features).timeline,
-            TrackDeck.from_features(incoming_features).timeline,
+            incoming_timeline,
             transformed_sample_count=(
                 mixer_incoming.shape[0]
                 - incoming_pcm[0].shape[0]
