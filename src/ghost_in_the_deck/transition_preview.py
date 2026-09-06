@@ -362,14 +362,20 @@ def _matched_mapping_diagnostics(
     sample_rate: int,
     outgoing_timeline: object,
     incoming_timeline: object,
+    transformed_sample_count: int | None = None,
 ) -> TransitionMappingDiagnostics:
     """Measure the post-transform window from its actual sample counts."""
     # Importing the concrete timeline type only for the optional beat-unit
     # conversion keeps this orchestration module independent of cue planning.
     outgoing_interval = getattr(outgoing_timeline, "nominal_interval", 0.0)
     incoming_interval = getattr(incoming_timeline, "nominal_interval", 0.0)
+    actual_transformed_sample_count = (
+        match.matched_sample_count
+        if transformed_sample_count is None
+        else transformed_sample_count
+    )
     outgoing_sample_count = match.matched_sample_count
-    residual_samples = match.matched_sample_count - outgoing_sample_count
+    residual_samples = outgoing_sample_count - actual_transformed_sample_count
     residual_seconds = residual_samples / sample_rate
     outgoing_beats = (
         residual_seconds / outgoing_interval
@@ -384,11 +390,11 @@ def _matched_mapping_diagnostics(
     return TransitionMappingDiagnostics(
         sample_rate=sample_rate,
         source_sample_count=match.incoming_sample_count,
-        transformed_sample_count=match.matched_sample_count,
+        transformed_sample_count=actual_transformed_sample_count,
         outgoing_sample_count=outgoing_sample_count,
         source_duration_seconds=match.incoming_sample_count / sample_rate,
-        transformed_duration_seconds=match.matched_sample_count / sample_rate,
-        outgoing_duration_seconds=match.matched_sample_count / sample_rate,
+        transformed_duration_seconds=actual_transformed_sample_count / sample_rate,
+        outgoing_duration_seconds=outgoing_sample_count / sample_rate,
         residual_end_drift_seconds=residual_seconds,
         residual_end_drift_outgoing_beats=outgoing_beats,
         residual_end_drift_incoming_beats=incoming_beats,
@@ -523,6 +529,11 @@ def _render_transition_preview(
             sample_rate,
             TrackDeck.from_features(outgoing_features).timeline,
             TrackDeck.from_features(incoming_features).timeline,
+            transformed_sample_count=(
+                mixer_incoming.shape[0]
+                - incoming_pcm[0].shape[0]
+                + match.incoming_sample_count
+            ),
         )
     try:
         mixed = execute_transition(
