@@ -173,9 +173,14 @@ def apply_initial_incoming_cue_correction(
     correction_samples: int,
 ) -> np.ndarray:
     """Apply an initial correction using the plan's accepted Phase 4D match."""
+    correction = _correction_samples(correction_samples)
+    if abs(correction) > MAX_INITIAL_CUE_CORRECTION_SAMPLES:
+        raise ValueError(
+            "correction_samples must be within the one-sample Phase 4E policy"
+        )
     match = tempo_match(plan, sample_rate)
     return _apply_initial_incoming_cue_correction(
-        transformed_samples, plan, sample_rate, correction_samples, match
+        transformed_samples, plan, sample_rate, correction, match
     )
 
 

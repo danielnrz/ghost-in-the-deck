@@ -1,8 +1,8 @@
-"""Deterministic BPM-match timing contract for an incoming transition source.
+"""Deterministic BPM matching and local PCM transformation for transitions.
 
-This module describes the input a later pitch-preserving time-stretcher will
-need.  It does not process PCM, resample audio or change ``TransitionPlan`` or
-the Phase 4B mixer.
+This module resolves the timing contract for an incoming transition source and
+applies that contract with the local pitch-preserving Rubber Band filter.  It
+does not change ``TransitionPlan`` or the Phase 4B mixer.
 
 The contract targets the outgoing deck's BPM.  ``incoming_playback_rate`` is
 the conventional playback-speed multiplier applied to the incoming source:
@@ -37,8 +37,8 @@ if TYPE_CHECKING:
     from ..transition import TransitionPlan
 
 
-# This is a contract boundary for the later offline stretcher, not a claim
-# that every future real-time backend will support the same quality envelope.
+# This is a contract boundary for the supported local offline stretcher, not a
+# claim that every future real-time backend will support the same quality envelope.
 SUPPORTED_PLAYBACK_RATE_MIN = 0.80
 SUPPORTED_PLAYBACK_RATE_MAX = 1.25
 

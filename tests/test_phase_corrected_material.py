@@ -52,11 +52,11 @@ def test_positive_correction_delays_only_the_matched_window():
     original = samples.copy()
 
     corrected = apply_initial_incoming_cue_correction(
-        samples, plan, sample_rate=10, correction_samples=2
+        samples, plan, sample_rate=10, correction_samples=1
     )
 
     np.testing.assert_array_equal(corrected[:10], original[:10])
-    np.testing.assert_array_equal(corrected[10:25], [10, 10, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22])
+    np.testing.assert_array_equal(corrected[10:25], [10, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23])
     np.testing.assert_array_equal(corrected[25:], original[25:])
     np.testing.assert_array_equal(samples, original)
     assert not np.shares_memory(corrected, samples)
@@ -67,10 +67,10 @@ def test_negative_correction_advances_only_the_matched_window():
     samples = np.arange(40.0)
 
     corrected = apply_initial_incoming_cue_correction(
-        samples, plan, sample_rate=10, correction_samples=-2
+        samples, plan, sample_rate=10, correction_samples=-1
     )
 
-    np.testing.assert_array_equal(corrected[10:25], [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 24, 24])
+    np.testing.assert_array_equal(corrected[10:25], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 24])
     np.testing.assert_array_equal(corrected[:10], samples[:10])
     np.testing.assert_array_equal(corrected[25:], samples[25:])
 
@@ -124,7 +124,7 @@ def test_supported_tempo_direction_is_inherited_by_phase4e(
 
 
 def test_correction_rejects_a_shift_that_discards_the_entire_window():
-    with pytest.raises(ValueError, match="leave part of the matched window"):
+    with pytest.raises(ValueError, match="one-sample Phase 4E policy"):
         apply_initial_incoming_cue_correction(
-            np.arange(30.0), _plan(), sample_rate=10, correction_samples=15
+            np.arange(30.0), _plan(), sample_rate=10, correction_samples=2
         )
