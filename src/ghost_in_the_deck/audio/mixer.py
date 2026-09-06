@@ -10,10 +10,39 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..transition import TransitionPlan
+if TYPE_CHECKING:
+    from ..transition import TransitionPlan
+
+
+_MIN_TRANSITION_SAMPLES = 2
+
+
+def _transition_plan_type():
+    """Load the planning type only when execution actually validates a plan."""
+    from ..transition import TransitionPlan
+
+    return TransitionPlan
+
+
+def _validate_transition_plan(plan: object) -> None:
+    if not isinstance(plan, _transition_plan_type()):
+        raise ValueError("plan must be a TransitionPlan")
+
+
+def _validate_sample_rate(sample_rate: object) -> int:
+    """Return a positive integral sample rate, rejecting coercible impostors."""
+    if isinstance(sample_rate, (bool, np.bool_)) or not isinstance(
+        sample_rate, (int, np.integer)
+    ):
+        raise ValueError("sample_rate must be a positive integer")
+    rate = int(sample_rate)
+    if rate <= 0:
+        raise ValueError("sample_rate must be a positive integer")
+    return rate
 
 
 def _as_float_channels(samples: np.ndarray, name: str) -> tuple[np.ndarray, bool]:
@@ -48,14 +77,19 @@ def _as_float_channels(samples: np.ndarray, name: str) -> tuple[np.ndarray, bool
 
 
 def _source_start_index(anchor_seconds: float, sample_rate: float, name: str) -> int:
-    """Map an absolute source-time anchor to its nearest PCM frame."""
+    """Map an absolute source-time anchor to its nearest PCM frame.
+
+    Halfway positions are assigned to the later frame explicitly.  Python's
+    built-in ``round`` uses ties-to-even, which would make the result depend
+    on whether the preceding frame index was even or odd.
+    """
     anchor = float(anchor_seconds)
     if not math.isfinite(anchor) or anchor < 0.0:
         raise ValueError(f"{name} must be a finite non-negative number")
     frame_position = anchor * sample_rate
     if not math.isfinite(frame_position):
         raise ValueError(f"{name} is outside the addressable sample range")
-    return int(round(frame_position))
+    return math.floor(frame_position + 0.5)
 
 
 def execute_transition(
@@ -78,8 +112,7 @@ def execute_transition(
     enough frames after their respective anchors for the complete transition.
     Inputs are copied before processing and the returned array owns its data.
     """
-    if not isinstance(plan, TransitionPlan):
-        raise TypeError("plan must be a TransitionPlan")
+    _validate_transition_plan(plan)
 
     outgoing, outgoing_was_mono = _as_float_channels(
         outgoing_samples, "outgoing_samples"
@@ -94,8 +127,8 @@ def execute_transition(
 
     clock = TransitionClock(plan, sample_rate)
     sample_count = clock.sample_count
-    if sample_count < 1:
-        raise ValueError("transition must contain at least one output sample")
+    if sample_count < _MIN_TRANSITION_SAMPLES:
+        raise ValueError("transition must contain at least two output samples")
 
     outgoing_start = _source_start_index(
         clock.outgoing_anchor_seconds, clock.sample_rate, "outgoing anchor"
@@ -134,22 +167,23 @@ def linear_crossfade_gains(sample_count: int) -> tuple[np.ndarray, np.ndarray]:
     """Return outgoing and incoming gains for a linear crossfade.
 
     The first sample belongs entirely to the outgoing source and the last
-    sample belongs entirely to the incoming source.  A one-sample crossfade
-    therefore has outgoing gain ``1.0`` and incoming gain ``0.0``: the only
-    sample is owned by the outgoing endpoint.  The returned arrays are new,
-    independent ``float64`` arrays.
+    sample belongs entirely to the incoming source.  At least two samples are
+    required so those endpoint ownership rules remain distinct.  The returned
+    arrays are new, independent ``float64`` arrays.
 
     Args:
-        sample_count: Number of samples in the crossfade; must be a positive
-            integer.
+        sample_count: Number of samples in the crossfade; must be an integer
+            of at least two.
 
     Raises:
-        ValueError: If ``sample_count`` is not a positive integer.
+        ValueError: If ``sample_count`` is not an integer of at least two.
     """
-    if isinstance(sample_count, bool) or not isinstance(sample_count, (int, np.integer)):
-        raise ValueError("sample_count must be a positive integer")
-    if sample_count < 1:
-        raise ValueError("sample_count must be a positive integer")
+    if isinstance(sample_count, (bool, np.bool_)) or not isinstance(
+        sample_count, (int, np.integer)
+    ):
+        raise ValueError("sample_count must be an integer of at least two")
+    if sample_count < _MIN_TRANSITION_SAMPLES:
+        raise ValueError("sample_count must be an integer of at least two")
 
     outgoing = np.linspace(1.0, 0.0, int(sample_count), dtype=np.float64)
     incoming = 1.0 - outgoing
@@ -165,16 +199,17 @@ class TransitionClock:
     durations: no source is time-stretched to make unequal tempos line up.
     Both source clocks then advance by exactly ``elapsed_seconds`` from their
     own anchor.  ``sample_count`` is the deterministic number of samples in
-    that window, using floor semantics for a partial final sample.
+    that window, using explicit half-up nearest-sample semantics for a partial
+    final sample.  Executable windows shorter than two samples are rejected by
+    the executor and crossfade gain function.
     """
 
     plan: TransitionPlan
     sample_rate: float
 
     def __post_init__(self) -> None:
-        rate = float(self.sample_rate)
-        if not math.isfinite(rate) or rate <= 0.0:
-            raise ValueError("sample_rate must be a finite positive number")
+        _validate_transition_plan(self.plan)
+        rate = _validate_sample_rate(self.sample_rate)
         object.__setattr__(self, "sample_rate", rate)
 
         for name in ("outgoing_duration_seconds", "incoming_duration_seconds"):
@@ -217,8 +252,8 @@ class TransitionClock:
 
     @property
     def sample_count(self) -> int:
-        """Number of whole output samples in the executable duration."""
-        return int(self.executable_duration_seconds * self.sample_rate)
+        """Number of output samples, rounded to the nearest sample half-up."""
+        return math.floor(self.executable_duration_seconds * self.sample_rate + 0.5)
 
     def _check_elapsed(self, elapsed_seconds: float) -> float:
         elapsed = float(elapsed_seconds)
