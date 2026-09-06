@@ -26,8 +26,12 @@ from __future__ import annotations
 
 import math
 import numbers
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 if TYPE_CHECKING:
     from ..transition import TransitionPlan
@@ -157,3 +161,169 @@ def tempo_match(plan: "TransitionPlan", sample_rate: int) -> TempoMatch:
 # Descriptive spelling for callers that want to emphasize this is a plan
 # calculation rather than an audio-processing operation.
 tempo_match_for_plan = tempo_match
+
+
+def _as_float_pcm(samples: object) -> tuple[np.ndarray, bool]:
+    """Validate PCM and return an owned float64 array plus its mono shape flag."""
+    try:
+        raw = np.asarray(samples)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("incoming_samples must be a numeric PCM array") from exc
+    if raw.ndim not in (1, 2):
+        raise ValueError(
+            "incoming_samples must have shape (frames,) or (frames, channels)"
+        )
+    if raw.dtype.kind not in "fiu":
+        raise ValueError("incoming_samples must contain real numeric samples")
+    try:
+        pcm = np.array(raw, dtype=np.float64, copy=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("incoming_samples must contain float-compatible samples") from exc
+    if pcm.ndim == 2 and pcm.shape[1] < 1:
+        raise ValueError("incoming_samples must have at least one channel")
+    if pcm.shape[0] < 1:
+        raise ValueError("incoming_samples must not be empty")
+    if not np.all(np.isfinite(pcm)):
+        raise ValueError("incoming_samples must contain only finite samples")
+    return pcm, pcm.ndim == 1
+
+
+def _incoming_anchor_sample(plan: "TransitionPlan", sample_rate: int) -> int:
+    anchor_seconds = _validate_number(plan.incoming_time, "incoming anchor")
+    return _half_up_sample_count(anchor_seconds, sample_rate)
+
+
+def _rubberband_transform(
+    material: np.ndarray,
+    *,
+    sample_rate: int,
+    channels: int,
+    tempo: float,
+    output_sample_count: int,
+) -> np.ndarray:
+    """Run the local pitch-neutral Rubber Band filter on one PCM window."""
+    executable = shutil.which("ffmpeg")
+    if executable is None:
+        raise RuntimeError("ffmpeg with the rubberband filter is required")
+
+    # Raw float PCM keeps this boundary independent of file codecs and gives
+    # the filter no opportunity to replace or rewrite either source file.
+    command = [
+        executable,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-filter_threads",
+        "1",
+        "-f",
+        "f64le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        str(channels),
+        "-i",
+        "pipe:0",
+        "-af",
+        (
+            f"rubberband=tempo={tempo:.17g}:pitch=1.0:"
+            "formant=preserved:channels=together"
+        ),
+        "-f",
+        "f64le",
+        "-acodec",
+        "pcm_f64le",
+        "pipe:1",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            input=np.ascontiguousarray(material, dtype=np.float64).tobytes(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=30.0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = ""
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            detail = f": {exc.stderr.decode(errors='replace').strip()}"
+        raise RuntimeError(f"rubberband could not transform incoming PCM{detail}") from exc
+
+    raw_output = completed.stdout
+    frame_width = channels * np.dtype("<f8").itemsize
+    if len(raw_output) == 0 or len(raw_output) % frame_width:
+        raise RuntimeError("rubberband returned an invalid PCM buffer")
+    transformed = np.frombuffer(raw_output, dtype="<f8").reshape(-1, channels)
+    if not np.all(np.isfinite(transformed)):
+        raise RuntimeError("rubberband returned non-finite PCM")
+
+    # Rubber Band's block tail can differ by a frame across versions.  The
+    # contract owns the final sample count, so trim or zero-pad only at the
+    # transformed window's tail.
+    if transformed.shape[0] >= output_sample_count:
+        return np.array(transformed[:output_sample_count], dtype=np.float64, copy=True)
+    padded = np.zeros((output_sample_count, channels), dtype=np.float64)
+    padded[: transformed.shape[0]] = transformed
+    return padded
+
+
+def stretch_incoming_transition(
+    incoming_samples: np.ndarray,
+    plan: "TransitionPlan",
+    sample_rate: int,
+) -> np.ndarray:
+    """Pitch-preserve only the incoming transition window of one PCM source.
+
+    The input is the complete incoming source beginning at source time zero.
+    The window starts at ``plan.incoming_time`` and has the plan's incoming
+    duration.  It is transformed to the plan's authoritative outgoing duration
+    using the documented playback-rate policy.  The returned array is a new
+    source buffer: the prefix remains before the same cue frame, and the suffix
+    remains untouched after the transformed window.  No file or source path is
+    accessed by this function.
+
+    Mono input retains shape ``(frames,)``; multi-channel input retains shape
+    ``(frames, channels)``.  The returned transition window has exactly the
+    half-up sample count from :func:`tempo_match`.
+    """
+    match = tempo_match(plan, sample_rate)
+    pcm, was_mono = _as_float_pcm(incoming_samples)
+    channels = 1 if was_mono else pcm.shape[1]
+    source_count = match.incoming_sample_count
+    output_count = match.matched_sample_count
+    if source_count < 1 or output_count < 1:
+        raise ValueError("incoming transition material must contain samples")
+
+    anchor = _incoming_anchor_sample(plan, match.sample_rate)
+    end = anchor + source_count
+    if end > pcm.shape[0]:
+        raise ValueError(
+            "incoming_samples do not contain the complete transition window"
+        )
+
+    material = pcm[anchor:end]
+    if was_mono:
+        material = material[:, None]
+    if match.incoming_playback_rate == 1.0 and source_count == output_count:
+        transformed = np.array(material, dtype=np.float64, copy=True)
+    else:
+        transformed = _rubberband_transform(
+            material,
+            sample_rate=match.sample_rate,
+            channels=channels,
+            tempo=match.incoming_playback_rate,
+            output_sample_count=output_count,
+        )
+    prefix = pcm[:anchor, None] if was_mono else pcm[:anchor]
+    suffix = pcm[end:, None] if was_mono else pcm[end:]
+    result = np.concatenate((prefix, transformed, suffix), axis=0)
+    if was_mono:
+        return np.array(result[:, 0], dtype=np.float64, copy=True)
+    return np.array(result, dtype=np.float64, copy=True)
+
+
+# Descriptive aliases for callers that name the operation by its material
+# boundary rather than by the selected backend.
+pitch_preserving_incoming_transition = stretch_incoming_transition
+transform_incoming_transition = stretch_incoming_transition
