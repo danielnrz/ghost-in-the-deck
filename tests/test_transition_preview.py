@@ -176,3 +176,49 @@ def test_preview_reports_mismatched_pcm_sample_rates(tmp_path: Path):
             tmp_path / "unused.wav",
             analysis_dir=tmp_path / "analysis",
         )
+
+
+def test_preview_output_temp_path_cannot_alias_source(tmp_path: Path):
+    outgoing = make_beat_track(tmp_path / "outgoing-source.wav", seconds=40.0)
+    aliased_source = tmp_path / "preview.wav.partial"
+    outgoing.rename(aliased_source)
+    outgoing = aliased_source
+    incoming = make_beat_track(tmp_path / "incoming-source.wav", seconds=40.0)
+    incoming_path = tmp_path / "incoming.audio"
+    incoming.rename(incoming_path)
+    incoming = incoming_path
+    original = outgoing.read_bytes()
+    output = tmp_path / "preview.wav"
+
+    render_transition_preview(
+        outgoing,
+        incoming,
+        output,
+        analysis_dir=tmp_path / "analysis",
+    )
+
+    assert output.is_file()
+    assert outgoing.read_bytes() == original
+
+
+def test_preview_cleans_unique_temp_file_after_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    outgoing = make_beat_track(tmp_path / "outgoing.wav", seconds=40.0)
+    incoming = make_beat_track(tmp_path / "incoming.wav", seconds=40.0)
+    output = tmp_path / "preview.wav"
+
+    def fail_write(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("forced preview write failure")
+
+    monkeypatch.setattr(sf, "write", fail_write)
+    with pytest.raises(transition_preview.TransitionPreviewError, match="could not write"):
+        render_transition_preview(
+            outgoing,
+            incoming,
+            output,
+            analysis_dir=tmp_path / "analysis",
+        )
+
+    assert not output.exists()
+    assert list(tmp_path.glob(".preview.wav.*.partial")) == []

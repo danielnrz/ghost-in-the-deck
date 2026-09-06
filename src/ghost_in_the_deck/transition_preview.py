@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
@@ -243,8 +245,25 @@ def _render_transition_preview(
         raise IncompatiblePCMError("transition mixer produced an empty PCM preview")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    partial = output_path.with_name(output_path.name + ".partial")
+    source_paths = {outgoing_path.resolve(), incoming_path.resolve()}
+    partial: Path | None = None
     try:
+        file_descriptor, partial_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.",
+            suffix=".partial",
+            dir=str(output_path.parent),
+        )
+        partial = Path(partial_name)
+        os.close(file_descriptor)
+        if partial.resolve() in source_paths:
+            raise TransitionPreviewError(
+                "transition preview temporary output must not replace a source file"
+            )
+        if output_path.resolve() in source_paths:
+            raise TransitionPreviewError(
+                "transition preview output must not replace a source file"
+            )
+
         import soundfile as sf
 
         sf.write(
@@ -254,15 +273,28 @@ def _render_transition_preview(
             format="WAV",
             subtype="PCM_16",
         )
+        if partial.resolve() in source_paths:
+            raise TransitionPreviewError(
+                "transition preview temporary output must not replace a source file"
+            )
+        if output_path.resolve() in source_paths:
+            raise TransitionPreviewError(
+                "transition preview output must not replace a source file"
+            )
         partial.replace(output_path)
+        partial = None
+    except TransitionPreviewError:
+        raise
     except (OSError, RuntimeError, ValueError) as exc:
-        try:
-            partial.unlink()
-        except FileNotFoundError:
-            pass
         raise TransitionPreviewError(
             f"could not write transition preview WAV {output_path}"
         ) from exc
+    finally:
+        if partial is not None:
+            try:
+                partial.unlink()
+            except FileNotFoundError:
+                pass
 
     diagnostics = diagnose_transition_drift(
         TrackDeck.from_features(outgoing_features).timeline,
