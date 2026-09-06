@@ -4,7 +4,7 @@ A 3D virtual DJ in Python. The long-term goal is a full-body humanoid avatar
 standing behind DJ equipment that behaves like a DJ — moving with the music it
 is playing, and eventually operating controls that genuinely change the audio.
 
-This repository is currently at **Phase 4A**.
+This repository is currently at **Phase 4B**.
 
 ## Phase 0 scope
 
@@ -757,6 +757,61 @@ What Phase 4A explicitly does **not** do:
 - **No cloud, no ML, no learned weights.** `PAIR_SCORE_WEIGHTS` is a plain
   tuple; every score traces to a measurement or a named constant.
 
+## Offline transition execution (Phase 4B)
+
+Phase 4B makes the Phase 4A `TransitionPlan` executable at the deterministic
+array level. It adds no new planning judgement: `execute_transition` in
+`audio/mixer.py` consumes an existing plan, two already-decoded PCM arrays and
+a sample rate, then returns one newly allocated offline mix. The shorter source
+window is rendered with a linear crossfade; there is no audio-file loading or
+Panda3D dependency in this path.
+
+The execution contract is deliberately small and explicit:
+
+- **Source-clock anchors:** `TransitionClock` takes the plan's absolute
+  `outgoing_time` and `incoming_time` as independent source anchors. At elapsed
+  time `t`, the source positions are `(outgoing_anchor + t,
+  incoming_anchor + t)`. Both clocks therefore advance by exactly the same
+  elapsed wall-clock amount. The PCM executor converts each anchor to its
+  nearest source frame and then reads one subsequent frame per output sample.
+- **Shortest-window policy:** the executable duration is
+  `min(outgoing_duration_seconds, incoming_duration_seconds)`. Its whole
+  sample count is `int(duration * sample_rate)`. Unequal tempos consequently
+  end the offline transition when the shorter planned window ends; no source is
+  stretched or resampled to fill the other window.
+- **Linear crossfade:** the first output sample belongs entirely to the
+  outgoing source and the last belongs entirely to the incoming source. Gains
+  are bounded complements that change linearly across the output window; a
+  one-sample window is owned by the outgoing endpoint.
+- **Preserved source arrays:** mono input has shape `(frames,)`, stereo or
+  other matching multi-channel input has shape `(frames, channels)`, and the
+  channel counts must match. Inputs are copied before processing and are never
+  mutated or returned as views; the result owns independent floating-point
+  storage.
+
+Phase 4B boundaries are equally deliberate:
+
+- **No live playback:** the executor is not wired into `app.py`,
+  `AudioSound`, the render loop, or a sound-card output path.
+- **No beat sync:** plan anchors remain the planner's preselected bar cues;
+  execution does not detect beats, re-align phases, or correct drift. Equal
+  elapsed source-clock mapping is not beat synchronisation.
+- **No time-stretch or resampling:** source samples advance one-for-one at the
+  supplied sample rate, and the shortest-window policy handles unequal planned
+  durations.
+- **No EQ or key work:** there are no filters, EQ bands, pitch shifts, key
+  matching, or other tonal processing operations.
+- **No playlist or deck orchestration:** the executor neither chooses tracks
+  nor builds a playlist, swaps decks, or schedules the next transition; it
+  receives one `TransitionPlan` and its two PCM buffers.
+- **No avatar or visual choreography:** no gesture, fader animation, hand IK,
+  workstation control, or other visual response is connected to this offline
+  render.
+
+Phase 4B therefore proves the numerical transition primitive only. Live
+playback wiring, beat-aware alignment, time-stretching, EQ, key matching,
+playlist orchestration and avatar choreography remain later-phase work.
+
 ## Tests
 
 ```bash
@@ -848,6 +903,17 @@ deck has no room for the full span; and `regime` never leaves `build` /
 `release` / `peak` / `stable` end to
 end, with a source scan asserting no song-section vocabulary and no import of
 `dj_planner` or `dj_behavior` anywhere in `transition.py`.
+
+`test_transition_mixer.py` covers the Phase 4B executor: frozen source-clock
+anchors, equal-elapsed-time absolute mappings, deterministic sample counts,
+shortest-window execution without stretching, endpoint-owned linear gains,
+independent mono and stereo channel mixing, invalid-input rejection, and
+source/result memory independence. The focused two-deck and single-track
+regression command is:
+
+```bash
+cd /home/daniel/Documents/Programming/ghost-in-the-deck && PYTHONPATH=src:tests DISPLAY=:1 .venv/bin/python -m pytest tests/test_transition_mixer.py tests/test_transition.py tests/test_deck.py tests/test_dj_planner.py tests/test_dj_behavior.py tests/test_musical_structure.py tests/test_review_fixes.py -q
+```
 
 Tests needing a display skip without one; under a headless shell use `xvfb-run -a`.
 

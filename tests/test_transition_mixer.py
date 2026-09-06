@@ -185,10 +185,17 @@ def test_execute_transition_mixes_stereo_channels_independently():
     assert result.shape == (3, 2)
 
 
-def test_execute_transition_is_deterministic_and_preserves_sources():
+@pytest.mark.parametrize("stereo", [False, True], ids=["mono", "stereo"])
+def test_execute_transition_is_deterministic_and_preserves_sources(stereo):
     plan = _plan(outgoing_time=1.0, incoming_time=1.0, outgoing_duration=4.0, incoming_duration=4.0)
-    outgoing = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
-    incoming = np.linspace(1.0, -1.0, 8, dtype=np.float32)
+    outgoing_mono = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
+    incoming_mono = np.linspace(1.0, -1.0, 8, dtype=np.float32)
+    if stereo:
+        outgoing = np.column_stack((outgoing_mono, -outgoing_mono))
+        incoming = np.column_stack((incoming_mono, -incoming_mono))
+    else:
+        outgoing = outgoing_mono
+        incoming = incoming_mono
     outgoing_before = outgoing.copy()
     incoming_before = incoming.copy()
 
@@ -199,6 +206,7 @@ def test_execute_transition_is_deterministic_and_preserves_sources():
     np.testing.assert_array_equal(first[1:], second[1:])
     np.testing.assert_array_equal(outgoing, outgoing_before)
     np.testing.assert_array_equal(incoming, incoming_before)
+    assert first.flags.owndata
     assert not np.shares_memory(second, outgoing)
     assert not np.shares_memory(second, incoming)
 
