@@ -9,6 +9,7 @@ the eventual UI.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -62,9 +63,22 @@ class TransitionPreviewReport:
     channels: int
 
 
+def _feature_cache_path(track: Path, cache_dir: Path) -> Path:
+    """Return a readable, collision-safe cache path for one source file.
+
+    The stem is only decoration: two sources with the same name must remain
+    separate even when they share one analysis directory.  Resolving before
+    hashing also makes relative paths and symlinked paths address the same
+    source cache entry.
+    """
+    source_identity = str(track.resolve())
+    identity_digest = hashlib.sha256(source_identity.encode("utf-8")).hexdigest()
+    return cache_dir / f"{track.stem}-{identity_digest}.json"
+
+
 def _cached_features(track: Path, cache_dir: Path, refresh: bool) -> MusicFeatures:
     """Load or create the established JSON ``MusicFeatures`` cache entry."""
-    cached = cache_dir / f"{track.stem}.json"
+    cached = _feature_cache_path(track, cache_dir)
     if cached.is_file() and not refresh:
         try:
             stored = json.loads(cached.read_text())

@@ -62,6 +62,44 @@ def test_generated_tracks_render_deterministic_pcm16_wav_and_report_drift(
     assert incoming.read_bytes() == incoming_before
 
 
+def test_same_named_sources_use_distinct_feature_cache_entries(tmp_path: Path):
+    outgoing = make_beat_track(
+        tmp_path / "outgoing" / "same.wav", bpm=120.0, seconds=40.0
+    )
+    incoming = make_beat_track(
+        tmp_path / "incoming" / "same.wav", bpm=90.0, seconds=40.0
+    )
+    analysis_dir = tmp_path / "analysis"
+
+    first = transition_preview._render_transition_preview(
+        outgoing,
+        incoming,
+        tmp_path / "preview-one.wav",
+        refresh=False,
+        analysis_dir=analysis_dir,
+        margin_seconds=16.0,
+        limit_per_deck=5,
+        transition_bars=8,
+    )
+    second = transition_preview._render_transition_preview(
+        outgoing,
+        incoming,
+        tmp_path / "preview-two.wav",
+        refresh=False,
+        analysis_dir=analysis_dir,
+        margin_seconds=16.0,
+        limit_per_deck=5,
+        transition_bars=8,
+    )
+
+    assert len(list(analysis_dir.glob("same-*.json"))) == 2
+    assert first.plan == second.plan
+    assert first.diagnostics == second.diagnostics
+    assert first.output_path.read_bytes() == second.output_path.read_bytes()
+    assert first.plan.bpm_a > first.plan.bpm_b
+    assert first.diagnostics.predicted_end_drift_seconds < -3.0
+
+
 def test_preview_delegates_mixing_to_the_phase_4b_executor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
