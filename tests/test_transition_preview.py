@@ -249,6 +249,46 @@ def test_feature_cache_path_cannot_alias_incoming_source(tmp_path: Path):
     assert sorted(path.name for path in analysis_dir.iterdir()) == [cache_path.name]
 
 
+def test_feature_cache_symlink_alias_is_rejected_without_artifacts(tmp_path: Path):
+    outgoing = make_beat_track(tmp_path / "outgoing.wav", seconds=40.0)
+    incoming = make_beat_track(tmp_path / "incoming.wav", seconds=40.0)
+    analysis_dir = tmp_path / "analysis"
+    cache_path = transition_preview._feature_cache_path(outgoing, analysis_dir)
+    cache_path.parent.mkdir()
+    cache_path.symlink_to(incoming)
+
+    with pytest.raises(
+        transition_preview.TransitionPreviewError,
+        match="generated feature-cache path must not alias an input source",
+    ):
+        render_transition_preview(
+            outgoing, incoming, tmp_path / "preview.wav", analysis_dir=analysis_dir
+        )
+
+    assert cache_path.is_symlink()
+    assert not (tmp_path / "preview.wav").exists()
+
+
+def test_feature_cache_hardlink_alias_is_rejected_without_artifacts(tmp_path: Path):
+    outgoing = make_beat_track(tmp_path / "outgoing.wav", seconds=40.0)
+    incoming = make_beat_track(tmp_path / "incoming.wav", seconds=40.0)
+    analysis_dir = tmp_path / "analysis"
+    cache_path = transition_preview._feature_cache_path(outgoing, analysis_dir)
+    cache_path.parent.mkdir()
+    cache_path.hardlink_to(incoming)
+
+    with pytest.raises(
+        transition_preview.TransitionPreviewError,
+        match="generated feature-cache path must not alias an input source",
+    ):
+        render_transition_preview(
+            outgoing, incoming, tmp_path / "preview.wav", analysis_dir=analysis_dir
+        )
+
+    assert cache_path.read_bytes() == incoming.read_bytes()
+    assert not (tmp_path / "preview.wav").exists()
+
+
 def test_preview_rejects_output_symlink_to_source_without_artifacts(tmp_path: Path):
     outgoing = make_beat_track(tmp_path / "outgoing.wav", seconds=40.0)
     incoming = make_beat_track(tmp_path / "incoming.wav", seconds=40.0)
