@@ -31,10 +31,15 @@ EDGE_MARGIN_SECONDS = 16.0
 # Upper bound on how many cue points one deck contributes to planning.
 MAX_CANDIDATES_PER_DECK = 5
 
-# Default span of a planned transition, in whole bars. Named independently of
-# ``structure.PHRASE_LENGTH_BARS``: the two constants currently share a value but
-# answer different questions - "how many bars to blend across" versus "the
-# length of the assumed phrase cycle" - so neither should track the other.
+# Default span of a planned transition, in whole bars. This is a planner/config
+# policy value - "how many bars this planner chooses to blend across" - not a
+# measured property of either track; a caller may override it via the
+# ``transition_bars`` keyword on ``candidate_cue_points``,
+# ``TransitionPlan.from_selection`` and ``plan_transition``. 8 bars is the
+# current documented default. Named independently of ``structure.PHRASE_LENGTH_BARS``:
+# the two constants currently share a value but answer different questions -
+# "how many bars this planner blends across" versus "the length of the assumed
+# phrase cycle" - so neither should track the other.
 DEFAULT_TRANSITION_LENGTH_BARS = 8
 
 
@@ -151,10 +156,20 @@ class TransitionPlan:
     """One already-chosen way for ``deck_a`` to move into ``deck_b``.
 
     A pure data object: constructing or holding a ``TransitionPlan`` performs no
-    audio processing, no crossfade and no EQ - it only records measured
-    quantities taken from the two decks and the two chosen cue points. Every
-    field traces back to a measurement or to a named module constant; no field
-    is an interpretation of the two tracks.
+    audio processing, no crossfade and no EQ - it only records quantities taken
+    from the two decks and the two chosen cue points.
+
+    Every field except ``transition_length_bars`` is a genuine measurement of one
+    of the two tracks (or a plain arithmetic combination of measurements).
+    ``transition_length_bars`` is the exception: it is a planner/config policy
+    value - the number of bars this planner chose to blend across, defaulting to
+    ``DEFAULT_TRANSITION_LENGTH_BARS`` (currently 8) - not a property measured
+    from either track. The two seconds figures derived from it,
+    ``outgoing_duration_seconds`` and ``incoming_duration_seconds``, are that
+    policy bar count converted at deck A's and deck B's own bar lengths
+    respectively: with no time-stretching anywhere in this project, the same bar
+    count is not the same number of seconds on two decks at different tempos, so
+    there is deliberately no single shared "transition duration" field.
     """
 
     outgoing_track: str
@@ -166,8 +181,9 @@ class TransitionPlan:
     bpm_a: float
     bpm_b: float
     bpm_ratio: float
-    expected_duration_bars: int
-    expected_duration_seconds: float
+    transition_length_bars: int
+    outgoing_duration_seconds: float
+    incoming_duration_seconds: float
     score: float
     reason: str
 
@@ -188,9 +204,12 @@ class TransitionPlan:
         out); ``incoming`` is a cue point on ``context.deck_b`` (the track being
         mixed in). ``score`` and ``reason`` are supplied by the caller that chose
         this pair - this constructor neither generates candidates nor ranks
-        them. ``expected_duration_bars`` is ``transition_bars`` (default
-        ``DEFAULT_TRANSITION_LENGTH_BARS``) and converted to seconds at
-        ``deck_a``'s bar length.
+        them. ``transition_length_bars`` is ``transition_bars`` (default
+        ``DEFAULT_TRANSITION_LENGTH_BARS``) - a planner/config policy value, not
+        a measurement of either track - and is converted to seconds twice, once
+        at ``deck_a``'s bar length (``outgoing_duration_seconds``) and once at
+        ``deck_b``'s (``incoming_duration_seconds``), because the same bar count
+        is not the same number of seconds on two decks at different tempos.
         """
         return cls(
             outgoing_track=context.deck_a.track,
@@ -202,29 +221,44 @@ class TransitionPlan:
             bpm_a=context.deck_a.bpm,
             bpm_b=context.deck_b.bpm,
             bpm_ratio=context.bpm_ratio,
-            expected_duration_bars=transition_bars,
-            expected_duration_seconds=transition_bars * context.bar_seconds_a,
+            transition_length_bars=transition_bars,
+            outgoing_duration_seconds=transition_bars * context.bar_seconds_a,
+            incoming_duration_seconds=transition_bars * context.bar_seconds_b,
             score=score,
             reason=reason,
         )
 
 
 # Weights behind a pair's combined score: the outgoing cue's own stability
-# score, the incoming cue's own stability score, and the tempo-closeness term
+# score, the incoming cue's own stability score, and the tempo-similarity term
 # from ``bpm_ratio``. Equal weights - a plain mean - is the documented default;
 # nothing here is tuned, fitted or learned. Change the tuple to reweight.
 PAIR_SCORE_WEIGHTS = (1.0, 1.0, 1.0)
 
 
-def tempo_closeness(bpm_ratio: float) -> float:
-    """How close two decks' tempos are, as a 0..1 score - 1.0 at an exact match.
+def tempo_similarity(bpm_a: float, bpm_b: float) -> float:
+    """How close two decks' tempos are, as a symmetric 0..1 score.
 
-    ``1.0 - min(abs(bpm_ratio - 1.0), 1.0)``: a half- or double-speed pairing
-    (ratio 0.5 or 2.0) still scores 0.5, and anything a whole multiple or more
-    apart floors at 0.0. Direction-sensitive because ``bpm_ratio`` is: the score
-    for ``r`` and for ``1 / r`` are generally different numbers.
+    ``min(bpm_a, bpm_b) / max(bpm_a, bpm_b)`` - equivalently ``min(r, 1 / r)``
+    for the tempo ratio ``r`` - so it is ``1.0`` at an exact tempo match and
+    falls off the same way whichever deck is the faster one. Because ``min`` and
+    ``max`` do not depend on argument order, ``tempo_similarity(x, y)`` and
+    ``tempo_similarity(y, x)`` compute a byte-identical float; it is taken over
+    the two raw BPMs rather than over ``context.bpm_ratio`` precisely so that
+    swapping the decks changes nothing (``b / a`` and ``a / b`` are not exact
+    floating-point reciprocals, so a single-ratio form would differ in the last
+    bit under a swap). Returns ``0.0`` when either BPM is non-positive - an
+    undefined tempo pairing, e.g. a deck analysed to ``bpm == 0``.
+
+    This is a plain tempo-gap term for ranking cue pairs only; it deliberately
+    does not treat a half-time or double-time pairing as "similar" - beat
+    matching belongs to a later phase.
     """
-    return 1.0 - min(abs(bpm_ratio - 1.0), 1.0)
+    hi = max(bpm_a, bpm_b)
+    lo = min(bpm_a, bpm_b)
+    if lo <= 0.0:
+        return 0.0
+    return lo / hi
 
 
 def _combined_score(
@@ -253,8 +287,9 @@ def plan_transition(
     ``context.deck_b`` (incoming) - each already requiring room after the cue for
     the full ``transition_bars``-bar span - scores every ``(outgoing, incoming)``
     pair as ``_combined_score`` of the outgoing cue's score, the incoming cue's
-    score and ``tempo_closeness(context.bpm_ratio)``, and returns the top pair as
-    a ``TransitionPlan``. Ties break deterministically: earliest
+    score and ``tempo_similarity(deck_a.bpm, deck_b.bpm)`` (symmetric under a
+    deck swap), and returns the top pair as a ``TransitionPlan``. Ties break
+    deterministically: earliest
     ``outgoing.time``, then earliest ``incoming.time``.
 
     Returns ``None`` when either deck yields zero candidates - including when a
@@ -282,7 +317,7 @@ def plan_transition(
     if not outgoing_candidates or not incoming_candidates:
         return None
 
-    tempo_score = tempo_closeness(context.bpm_ratio)
+    tempo_score = tempo_similarity(context.deck_a.bpm, context.deck_b.bpm)
 
     best: tuple[CuePoint, CuePoint, float] | None = None
     best_key: tuple[float, float, float] | None = None
@@ -299,7 +334,8 @@ def plan_transition(
     reason = (
         f"combined {score:.4f} = weighted mean("
         f"outgoing {outgoing.score:.4f}, incoming {incoming.score:.4f}, "
-        f"tempo {tempo_score:.4f} from bpm_ratio {context.bpm_ratio:.4f}) "
+        f"tempo_similarity {tempo_score:.4f} from bpm {context.deck_a.bpm:.4f}/"
+        f"{context.deck_b.bpm:.4f}) "
         f"weights {PAIR_SCORE_WEIGHTS}"
     )
     return TransitionPlan.from_selection(

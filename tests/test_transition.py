@@ -23,7 +23,7 @@ from ghost_in_the_deck.transition import (
     TwoDeckContext,
     candidate_cue_points,
     plan_transition,
-    tempo_closeness,
+    tempo_similarity,
 )
 
 from synthetic import make_features, regular_beats
@@ -215,16 +215,61 @@ class CandidateCuePoints(unittest.TestCase):
         self.assertEqual(candidate_cue_points(slow_short), [])
 
 
-class TempoCloseness(unittest.TestCase):
-    def test_exact_match_scores_one_and_is_direction_sensitive(self):
-        self.assertEqual(tempo_closeness(1.0), 1.0)
-        # r and 1/r generally disagree because bpm_ratio itself is directional.
-        self.assertNotAlmostEqual(tempo_closeness(1.5), tempo_closeness(1 / 1.5))
-        # Below an exact match the score degrades linearly...
-        self.assertAlmostEqual(tempo_closeness(0.5), 0.5)
-        # ...while a whole multiple or more above it floors at zero.
-        self.assertEqual(tempo_closeness(2.0), 0.0)
-        self.assertEqual(tempo_closeness(3.0), 0.0)
+class TempoSimilarity(unittest.TestCase):
+    def test_exact_match_scores_one(self):
+        self.assertEqual(tempo_similarity(120.0, 120.0), 1.0)
+
+    def test_score_is_exactly_symmetric_in_its_two_arguments(self):
+        # The term feeds pair scoring, so it must not depend on which deck is A.
+        # 100/120 and 120/100 are the same tempo gap and must score exactly (not
+        # merely almost) the same.
+        for bpm_a, bpm_b in ((100.0, 120.0), (128.0, 90.0), (120.0, 124.0), (174.0, 87.0)):
+            self.assertEqual(
+                tempo_similarity(bpm_a, bpm_b), tempo_similarity(bpm_b, bpm_a)
+            )
+
+    def test_score_is_min_over_max_of_the_two_tempos(self):
+        self.assertAlmostEqual(tempo_similarity(100.0, 120.0), 100.0 / 120.0)
+        self.assertAlmostEqual(tempo_similarity(120.0, 100.0), 100.0 / 120.0)
+        # A wider gap scores lower, symmetrically.
+        self.assertAlmostEqual(tempo_similarity(60.0, 120.0), 0.5)
+        self.assertAlmostEqual(tempo_similarity(120.0, 60.0), 0.5)
+
+    def test_non_positive_bpm_scores_zero(self):
+        # An undefined tempo pairing (a deck analysed to bpm == 0).
+        self.assertEqual(tempo_similarity(0.0, 120.0), 0.0)
+        self.assertEqual(tempo_similarity(120.0, 0.0), 0.0)
+
+
+class ThreeTempoQuantitiesHaveDistinctSymmetry(unittest.TestCase):
+    """bpm_ratio is directional; bpm_difference and the scoring term are not."""
+
+    def _pairs(self):
+        for bpm_a, bpm_b in ((100.0, 120.0), (120.0, 100.0), (128.0, 90.0), (120.0, 124.0)):
+            a = TrackDeck.from_features(
+                _features("a", bpm=bpm_a, duration=96.0, energy=_ramp_then_plateau)
+            )
+            b = TrackDeck.from_features(
+                _features("b", bpm=bpm_b, duration=96.0, energy=_plateau_then_fall)
+            )
+            yield bpm_a, bpm_b, TwoDeckContext(a, b), TwoDeckContext(b, a)
+
+    def test_bpm_ratio_is_directional_and_inverts_under_swap(self):
+        for _, _, ab, ba in self._pairs():
+            self.assertNotAlmostEqual(ab.bpm_ratio, ba.bpm_ratio)
+            self.assertAlmostEqual(ab.bpm_ratio, 1.0 / ba.bpm_ratio)
+
+    def test_bpm_difference_is_symmetric_and_unchanged_under_swap(self):
+        for bpm_a, bpm_b, ab, ba in self._pairs():
+            self.assertEqual(ab.bpm_difference, ba.bpm_difference)
+            self.assertAlmostEqual(ab.bpm_difference, abs(bpm_a - bpm_b))
+
+    def test_tempo_similarity_term_is_exactly_symmetric_under_swap(self):
+        for bpm_a, bpm_b, ab, ba in self._pairs():
+            forward = tempo_similarity(ab.deck_a.bpm, ab.deck_b.bpm)
+            reverse = tempo_similarity(ba.deck_a.bpm, ba.deck_b.bpm)
+            self.assertEqual(forward, reverse)
+            self.assertAlmostEqual(forward, min(bpm_a, bpm_b) / max(bpm_a, bpm_b))
 
 
 class PlanTransition(unittest.TestCase):
@@ -266,10 +311,17 @@ class PlanTransition(unittest.TestCase):
         self.assertEqual(plan.bpm_a, a.bpm)
         self.assertEqual(plan.bpm_b, b.bpm)
         self.assertAlmostEqual(plan.bpm_ratio, ctx.bpm_ratio)
-        self.assertEqual(plan.expected_duration_bars, DEFAULT_TRANSITION_LENGTH_BARS)
+        # transition_length_bars is a planner/config policy value, not measured.
+        self.assertEqual(plan.transition_length_bars, DEFAULT_TRANSITION_LENGTH_BARS)
+        # The two seconds figures convert that bar count at each deck's own bar
+        # length - there is no single shared "transition duration".
         self.assertAlmostEqual(
-            plan.expected_duration_seconds,
+            plan.outgoing_duration_seconds,
             DEFAULT_TRANSITION_LENGTH_BARS * ctx.bar_seconds_a,
+        )
+        self.assertAlmostEqual(
+            plan.incoming_duration_seconds,
+            DEFAULT_TRANSITION_LENGTH_BARS * ctx.bar_seconds_b,
         )
         # Every field is a plain scalar or string - a pure data object.
         for value in dataclasses.astuple(plan):
@@ -286,7 +338,7 @@ class PlanTransition(unittest.TestCase):
         incoming = next(
             c for c in candidate_cue_points(b) if c.bar_index == plan.incoming_bar_index
         )
-        tempo = tempo_closeness(ctx.bpm_ratio)
+        tempo = tempo_similarity(a.bpm, b.bpm)
         expected = (outgoing.score + incoming.score + tempo) / 3.0
         self.assertAlmostEqual(plan.score, expected)
 
@@ -300,10 +352,17 @@ class PlanTransition(unittest.TestCase):
         self.assertEqual(ab.bpm_a, ba.bpm_b)
         self.assertEqual(ab.bpm_b, ba.bpm_a)
         self.assertAlmostEqual(ab.bpm_ratio, 1.0 / ba.bpm_ratio)
-        # The transition span is measured on whichever deck is outgoing.
-        self.assertEqual(ab.expected_duration_bars, ba.expected_duration_bars)
+        # The policy bar count is not directional; the two seconds figures are,
+        # and a swap turns the outgoing one into the incoming one and back.
+        self.assertEqual(ab.transition_length_bars, ba.transition_length_bars)
+        self.assertAlmostEqual(
+            ab.outgoing_duration_seconds, ba.incoming_duration_seconds
+        )
+        self.assertAlmostEqual(
+            ab.incoming_duration_seconds, ba.outgoing_duration_seconds
+        )
         self.assertNotAlmostEqual(
-            ab.expected_duration_seconds, ba.expected_duration_seconds
+            ab.outgoing_duration_seconds, ab.incoming_duration_seconds
         )
 
     def test_twin_decks_isolate_the_directional_fields(self):
@@ -325,8 +384,9 @@ class PlanTransition(unittest.TestCase):
             "bpm_a",
             "bpm_b",
             "bpm_ratio",
-            "expected_duration_bars",
-            "expected_duration_seconds",
+            "transition_length_bars",
+            "outgoing_duration_seconds",
+            "incoming_duration_seconds",
             "score",
         ):
             self.assertEqual(
@@ -360,13 +420,37 @@ class PlanTransition(unittest.TestCase):
             plan = plan_transition(ctx)
             self.assertIsNotNone(plan)
             self.assertLessEqual(
-                plan.outgoing_time + plan.expected_duration_seconds, a.duration
+                plan.outgoing_time + plan.outgoing_duration_seconds, a.duration
             )
             self.assertLessEqual(
-                plan.incoming_time
-                + plan.expected_duration_bars * ctx.bar_seconds_b,
-                b.duration,
+                plan.incoming_time + plan.incoming_duration_seconds, b.duration
             )
+
+    def test_different_bpm_decks_get_distinct_per_deck_transition_seconds(self):
+        # 120 BPM out, 90 BPM in: 8 bars is 16.0 s on deck A and ~21.33 s on
+        # deck B. The plan must carry both, each correct on its own deck.
+        a = TrackDeck.from_features(
+            _features("fast-out", bpm=120.0, duration=200.0, energy=_ramp_then_plateau)
+        )
+        b = TrackDeck.from_features(
+            _features("slow-in", bpm=90.0, duration=200.0, energy=_plateau_then_fall)
+        )
+        ctx = TwoDeckContext(a, b)
+        plan = plan_transition(ctx)
+        self.assertIsNotNone(plan)
+        self.assertNotAlmostEqual(
+            plan.outgoing_duration_seconds, plan.incoming_duration_seconds
+        )
+        self.assertAlmostEqual(
+            plan.outgoing_duration_seconds,
+            plan.transition_length_bars * ctx.bar_seconds_a,
+        )
+        self.assertAlmostEqual(
+            plan.incoming_duration_seconds,
+            plan.transition_length_bars * ctx.bar_seconds_b,
+        )
+        self.assertAlmostEqual(plan.outgoing_duration_seconds, 16.0)
+        self.assertAlmostEqual(plan.incoming_duration_seconds, 8 * 4 * 60.0 / 90.0)
 
     def test_slow_short_track_plans_nothing_instead_of_overrunning(self):
         # Regression: bpm=60 / 40 s once returned a plan whose 32 s span ran to
@@ -389,6 +473,17 @@ class PlanTransition(unittest.TestCase):
         self.assertEqual(plan.incoming_bar_index, incoming.bar_index)
         self.assertEqual(plan.score, 0.5)
         self.assertEqual(plan.reason, "hand picked")
+        # The policy bar count is the default; each seconds figure is that count
+        # at its own deck's bar length.
+        self.assertEqual(plan.transition_length_bars, DEFAULT_TRANSITION_LENGTH_BARS)
+        self.assertAlmostEqual(
+            plan.outgoing_duration_seconds,
+            DEFAULT_TRANSITION_LENGTH_BARS * ctx.bar_seconds_a,
+        )
+        self.assertAlmostEqual(
+            plan.incoming_duration_seconds,
+            DEFAULT_TRANSITION_LENGTH_BARS * ctx.bar_seconds_b,
+        )
 
 
 class BeatlessDeck(unittest.TestCase):

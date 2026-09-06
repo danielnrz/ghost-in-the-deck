@@ -712,21 +712,32 @@ would run the wrong way.
   bar. Fully deterministic: no hashing, no randomness. A track too slow or too
   short for a full transition to fit yields an empty list.
 - **`TransitionPlan`** is a **frozen pure-data object**. It records one
-  already-chosen pair of cue points plus the measured quantities around it
-  (both BPMs, the ratio, the two bar-aligned times, a
-  `DEFAULT_TRANSITION_LENGTH_BARS` span converted to seconds at `deck_a`'s bar
-  length - and guaranteed to fit on both decks by candidate selection - the
-  combined score, and a `reason` string spelling out the
-  arithmetic). Constructing or holding one performs **no audio processing, no
-  crossfade, no EQ, no time-stretch**.
+  already-chosen pair of cue points plus the quantities around it (both BPMs,
+  the ratio, the two bar-aligned times, the combined score, and a `reason`
+  string spelling out the arithmetic). Every field except one is a genuine
+  measurement of one of the two tracks. The exception is
+  `transition_length_bars`: a **planner/config policy value** - the number of
+  bars this planner chose to blend across, defaulting to
+  `DEFAULT_TRANSITION_LENGTH_BARS` (currently 8), overridable via the
+  `transition_bars` keyword - not a property measured from either track. Because
+  no time-stretching exists yet, that same bar count is a different number of
+  seconds on two decks at different tempos, so the plan carries **two**
+  seconds figures, not one: `outgoing_duration_seconds` at `deck_a`'s bar
+  length and `incoming_duration_seconds` at `deck_b`'s, each guaranteed to fit
+  on its own deck by candidate selection. Constructing or holding one performs
+  **no audio processing, no crossfade, no EQ, no time-stretch**.
 - **`plan_transition(context)`** generates candidates for each deck, scores
   every outgoing/incoming pair as an equal-weighted mean of the two cue scores
-  and `tempo_closeness(bpm_ratio)`, and returns the best pair as a
-  `TransitionPlan`. Ties break deterministically by earliest times. It returns
-  `None` rather than invent a cue point when either deck has no room. The same
-  two `TrackDeck`s give a byte-identical plan every call. Swapping `deck_a` and
-  `deck_b` swaps exactly the directional fields (the two tracks, the two BPMs,
-  the ratio to its reciprocal, the span in seconds) and moves nothing else.
+  and `tempo_similarity(deck_a.bpm, deck_b.bpm)` - a symmetric
+  `min(bpm) / max(bpm)` tempo-gap term, `1.0` at an exact match, taken over the
+  two raw BPMs so it is byte-identical when the decks are swapped (it is a plain
+  gap for ranking only and does **not** treat half/double time as similar) -
+  and returns the best pair as a `TransitionPlan`. Ties break deterministically
+  by earliest times. It returns `None` rather than invent a cue point when
+  either deck has no room. The same two `TrackDeck`s give a byte-identical plan
+  every call. Swapping `deck_a` and `deck_b` swaps exactly the directional
+  fields (the two tracks, the two BPMs, the ratio to its reciprocal, the
+  outgoing/incoming seconds figures to each other) and moves nothing else.
 
 What Phase 4A explicitly does **not** do:
 
@@ -825,10 +836,16 @@ standalone build; the candidate set and the `TransitionPlan` are byte-identical
 for the same two analysed tracks and config; every candidate and plan time sits
 inside `[margin, duration - margin]` and equals `beat_time(bar * 4)` on the real
 `BeatTimeline`; swapping `deck_a` / `deck_b` swaps exactly the track names, the
-BPMs, `bpm_ratio` (to its reciprocal) and the span in seconds and moves nothing
-else (checked against a pair of decks identical but for their name); `plan_transition`
-returns `None` rather than fabricate a cue when a deck has no room for the full
-span; and `regime` never leaves `build` / `release` / `peak` / `stable` end to
+BPMs, `bpm_ratio` (to its reciprocal) and the outgoing/incoming seconds figures
+(to each other) and moves nothing else (checked against a pair of decks
+identical but for their name); `tempo_similarity` scores exactly equal for a
+ratio and its inverse while `bpm_ratio` stays directional and `bpm_difference`
+stays symmetric (three distinct assertions); a plan on two decks at different
+BPMs carries a different `outgoing_duration_seconds` and
+`incoming_duration_seconds`, each the policy bar count at that deck's own bar
+length; `plan_transition` returns `None` rather than fabricate a cue when a
+deck has no room for the full span; and `regime` never leaves `build` /
+`release` / `peak` / `stable` end to
 end, with a source scan asserting no song-section vocabulary and no import of
 `dj_planner` or `dj_behavior` anywhere in `transition.py`.
 
