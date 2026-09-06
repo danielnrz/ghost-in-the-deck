@@ -11,7 +11,35 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
+
 from ..transition import TransitionPlan
+
+
+def linear_crossfade_gains(sample_count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return outgoing and incoming gains for a linear crossfade.
+
+    The first sample belongs entirely to the outgoing source and the last
+    sample belongs entirely to the incoming source.  A one-sample crossfade
+    therefore has outgoing gain ``1.0`` and incoming gain ``0.0``: the only
+    sample is owned by the outgoing endpoint.  The returned arrays are new,
+    independent ``float64`` arrays.
+
+    Args:
+        sample_count: Number of samples in the crossfade; must be a positive
+            integer.
+
+    Raises:
+        ValueError: If ``sample_count`` is not a positive integer.
+    """
+    if isinstance(sample_count, bool) or not isinstance(sample_count, (int, np.integer)):
+        raise ValueError("sample_count must be a positive integer")
+    if sample_count < 1:
+        raise ValueError("sample_count must be a positive integer")
+
+    outgoing = np.linspace(1.0, 0.0, int(sample_count), dtype=np.float64)
+    incoming = 1.0 - outgoing
+    return outgoing, incoming
 
 
 @dataclass(frozen=True)

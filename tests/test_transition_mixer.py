@@ -1,8 +1,9 @@
 import dataclasses
 
+import numpy as np
 import pytest
 
-from ghost_in_the_deck.audio.mixer import TransitionClock
+from ghost_in_the_deck.audio.mixer import TransitionClock, linear_crossfade_gains
 from ghost_in_the_deck.transition import TransitionPlan
 
 
@@ -96,3 +97,33 @@ def test_elapsed_mapping_rejects_times_outside_executable_window():
         clock.outgoing_time_at(-0.001)
     with pytest.raises(ValueError):
         clock.incoming_time_at(clock.duration_seconds + 0.001)
+
+
+def test_linear_crossfade_one_sample_assigns_endpoint_ownership():
+    outgoing, incoming = linear_crossfade_gains(1)
+
+    np.testing.assert_array_equal(outgoing, [1.0])
+    np.testing.assert_array_equal(incoming, [0.0])
+
+
+def test_linear_crossfade_is_bounded_complementary_and_linear():
+    outgoing, incoming = linear_crossfade_gains(5)
+
+    np.testing.assert_array_equal(outgoing, [1.0, 0.75, 0.5, 0.25, 0.0])
+    np.testing.assert_array_equal(incoming, [0.0, 0.25, 0.5, 0.75, 1.0])
+    assert np.all((0.0 <= outgoing) & (outgoing <= 1.0))
+    assert np.all((0.0 <= incoming) & (incoming <= 1.0))
+    np.testing.assert_array_equal(outgoing + incoming, np.ones(5))
+
+
+@pytest.mark.parametrize("sample_count", [0, -1, 1.5, "4", True, False])
+def test_linear_crossfade_rejects_invalid_sample_counts(sample_count):
+    with pytest.raises(ValueError, match="positive integer"):
+        linear_crossfade_gains(sample_count)
+
+
+def test_linear_crossfade_returns_independent_arrays():
+    outgoing, incoming = linear_crossfade_gains(3)
+    outgoing[1] = 0.0
+
+    np.testing.assert_array_equal(incoming, [0.0, 0.5, 1.0])
