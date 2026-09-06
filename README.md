@@ -775,14 +775,16 @@ The execution contract is deliberately small and explicit:
   elapsed wall-clock amount. The PCM executor converts each anchor to its
   nearest source frame and then reads one subsequent frame per output sample.
 - **Shortest-window policy:** the executable duration is
-  `min(outgoing_duration_seconds, incoming_duration_seconds)`. Its whole
-  sample count is `int(duration * sample_rate)`. Unequal tempos consequently
-  end the offline transition when the shorter planned window ends; no source is
-  stretched or resampled to fill the other window.
+  `min(outgoing_duration_seconds, incoming_duration_seconds)`. Its sample
+  count is `floor(duration * sample_rate + 0.5)`, assigning half-sample ties
+  to the later frame. Unequal tempos consequently end the offline transition
+  when the shorter planned window ends; no source is stretched or resampled to
+  fill the other window. A transition must resolve to at least two samples so
+  the outgoing and incoming endpoints remain distinct.
 - **Linear crossfade:** the first output sample belongs entirely to the
   outgoing source and the last belongs entirely to the incoming source. Gains
   are bounded complements that change linearly across the output window; a
-  one-sample window is owned by the outgoing endpoint.
+  one-sample window is rejected because it cannot represent both endpoints.
 - **Preserved source arrays:** mono input has shape `(frames,)`, stereo or
   other matching multi-channel input has shape `(frames, channels)`, and the
   channel counts must match. Inputs are copied before processing and are never
@@ -995,7 +997,9 @@ Two format notes, both learned the hard way:
   in any semantic sense: the walk is the same fixed bar grid, there are no
   verse / chorus / drop / breakdown labels, `phrase_position` is an assumed
   eight-bar cycle that drives no decision, and the `MIN_GAP_BARS` spacing and
-  past-track-end drop are unchanged. There is still no two-track mixing.
+  past-track-end drop are unchanged. Offline two-track crossfading is now
+  implemented by the Phase 4B executor; live playback wiring remains future
+  work.
 - Bars are assumed to be four beats. A track in another metre still grooves,
   and gestures still land on a bar boundary, but the wrong one.
 - Before the first detected beat and after the last, the beat grid is
