@@ -502,7 +502,13 @@ def _render_transition_preview(
             mixer_incoming = stretch_incoming_transition(
                 incoming_pcm[0], plan, sample_rate
             )
-        except (RuntimeError, ValueError) as exc:
+        except ValueError as exc:
+            if "outside the supported range" in str(exc):
+                raise IncompatiblePCMError(str(exc)) from exc
+            raise IncompatiblePCMError(
+                "could not BPM-match the incoming transition material"
+            ) from exc
+        except RuntimeError as exc:
             raise IncompatiblePCMError(
                 "could not BPM-match the incoming transition material"
             ) from exc

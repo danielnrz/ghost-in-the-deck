@@ -69,15 +69,16 @@ def test_faster_incoming_track_slows_and_expands_to_outgoing_duration():
 
 
 def test_slower_incoming_track_speeds_up_and_contracts_to_outgoing_duration():
-    # 90 BPM over 120 BPM means the incoming source must play at 4/3x.
-    plan = _plan(bpm_a=120.0, bpm_b=90.0, outgoing=16.0, incoming=21.333333333333332)
+    # 96 BPM over 120 BPM means the incoming source must play at the 1.25x
+    # upper boundary of the supported range.
+    plan = _plan(bpm_a=120.0, bpm_b=96.0, outgoing=16.0, incoming=20.0)
 
     result = tempo_match(plan, sample_rate=10)
 
-    assert result.incoming_playback_rate == pytest.approx(4.0 / 3.0)
+    assert result.incoming_playback_rate == 1.25
     assert result.incoming_duration_seconds / result.rate == pytest.approx(16.0)
     assert result.matched_duration_seconds == 16.0
-    assert result.incoming_sample_count == 213
+    assert result.incoming_sample_count == 200
     assert result.matched_sample_count == 160
 
 
@@ -108,7 +109,9 @@ def test_supported_rate_boundaries_are_inclusive(rate):
     assert result.incoming_playback_rate == rate
 
 
-@pytest.mark.parametrize("bpm_a, bpm_b", [(120.0, 50.0), (120.0, 300.0)])
+@pytest.mark.parametrize(
+    "bpm_a, bpm_b", [(120.0, 120.0 / 0.79), (120.0, 120.0 / 1.26)]
+)
 def test_rate_outside_supported_range_is_rejected(bpm_a, bpm_b):
     with pytest.raises(ValueError, match="supported range"):
         tempo_match(

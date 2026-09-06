@@ -15,7 +15,7 @@ less time.  The rate is not folded through a half-time or double-time
 interpretation; the two BPM values are used directly.
 
 The supported offline policy is an inclusive playback-rate range of
-``0.5 <= incoming_playback_rate <= 2.0``.  A request outside that range is
+``0.80 <= incoming_playback_rate <= 1.25``.  A request outside that range is
 rejected rather than silently changing the target.  The outgoing transition
 duration is authoritative after matching.  Source and matched sample counts
 are both rounded to the nearest sample with explicit half-up ties:
@@ -39,8 +39,8 @@ if TYPE_CHECKING:
 
 # This is a contract boundary for the later offline stretcher, not a claim
 # that every future real-time backend will support the same quality envelope.
-SUPPORTED_PLAYBACK_RATE_MIN = 0.5
-SUPPORTED_PLAYBACK_RATE_MAX = 2.0
+SUPPORTED_PLAYBACK_RATE_MIN = 0.80
+SUPPORTED_PLAYBACK_RATE_MAX = 1.25
 
 
 def _validate_number(value: object, name: str, *, positive: bool = False) -> float:

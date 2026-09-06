@@ -858,12 +858,13 @@ PYTHONPATH=src .venv/bin/python -m ghost_in_the_deck.transition_preview \
 ```
 
 This mode transforms only the incoming transition window with the documented
-pitch-preserving material path. Its playback-rate policy is inclusive from
-`0.5` through `2.0`; requests outside that range fail instead of changing the
-target. The summary retains the no-stretch drift as the before value and adds
-the residual whole-sample mapping after the transform. It does not change cue
-anchors, re-align beat phase, or claim semantic synchronization. `--bpm-match`
-is a shortcut for `--mode bpm-matched`.
+pitch-preserving material path. Its supported playback-rate policy is
+inclusive from `0.80` through `1.25`; requests below `0.80` or above `1.25`
+fail instead of changing the target. The summary retains the no-stretch drift
+as the before value and adds the residual whole-sample mapping after the
+transform. It does not change cue anchors, re-align beat phase, or claim
+semantic synchronization. `--bpm-match` is a shortcut for
+`--mode bpm-matched`.
 
 Generated test audio is created under pytest temporary directories. Private
 tracks belong in `testMusic/`, whose contents are ignored, and previews,

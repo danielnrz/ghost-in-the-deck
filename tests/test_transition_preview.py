@@ -15,6 +15,7 @@ from ghost_in_the_deck.transition_preview import (
     format_preview_summary,
     render_transition_preview,
 )
+from ghost_in_the_deck.transition import TransitionPlan
 from synthetic import SAMPLE_RATE, make_beat_track
 
 
@@ -70,7 +71,7 @@ def test_bpm_matched_preview_reduces_residual_drift_without_claiming_alignment(
         tmp_path / "outgoing.wav", bpm=120.0, seconds=40.0
     )
     incoming = make_beat_track(
-        tmp_path / "incoming.wav", bpm=90.0, seconds=40.0
+        tmp_path / "incoming.wav", bpm=100.0, seconds=40.0
     )
     report = transition_preview._render_transition_preview(
         outgoing,
@@ -85,7 +86,7 @@ def test_bpm_matched_preview_reduces_residual_drift_without_claiming_alignment(
     )
 
     assert report.mode == "bpm-matched"
-    assert report.diagnostics.predicted_end_drift_seconds < -3.0
+    assert report.diagnostics.predicted_end_drift_seconds < -2.0
     assert report.before_diagnostics == report.diagnostics
     assert report.after_diagnostics is not None
     matched = report.after_diagnostics
@@ -94,7 +95,56 @@ def test_bpm_matched_preview_reduces_residual_drift_without_claiming_alignment(
     assert abs(matched.residual_end_drift_seconds) < 1.0 / report.sample_rate
     summary = format_preview_summary(report)
     assert "BPM-matched sample mapping" in summary
+    assert "inclusive range [0.8, 1.25]" in summary
     assert "semantic alignment is not claimed" in summary
+
+
+@pytest.mark.parametrize("rate", [0.79, 1.26])
+def test_bpm_matched_preview_rejects_rate_outside_supported_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rate: float
+):
+    outgoing = tmp_path / "outgoing.wav"
+    incoming = tmp_path / "incoming.wav"
+    sf.write(outgoing, np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE)
+    sf.write(incoming, np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE)
+    plan = TransitionPlan(
+        outgoing_track="synthetic-outgoing",
+        incoming_track="synthetic-incoming",
+        outgoing_time=0.0,
+        incoming_time=0.0,
+        outgoing_bar_index=1,
+        incoming_bar_index=1,
+        bpm_a=120.0,
+        bpm_b=120.0 / rate,
+        bpm_ratio=(120.0 / rate) / 120.0,
+        transition_length_bars=1,
+        outgoing_duration_seconds=0.5,
+        incoming_duration_seconds=0.5,
+        score=1.0,
+        reason="synthetic fixture",
+    )
+    monkeypatch.setattr(
+        transition_preview,
+        "_build_plan",
+        lambda *args, **kwargs: (object(), object(), plan),
+    )
+
+    with pytest.raises(
+        IncompatiblePCMError, match=r"outside the supported range \[0.8, 1.25\]"
+    ):
+        transition_preview._render_transition_preview(
+            outgoing,
+            incoming,
+            tmp_path / "preview.wav",
+            refresh=False,
+            analysis_dir=tmp_path / "analysis",
+            margin_seconds=0.0,
+            limit_per_deck=1,
+            transition_bars=1,
+            mode="bpm-matched",
+        )
+
+    assert not (tmp_path / "preview.wav").exists()
 
 
 def test_same_named_sources_use_distinct_feature_cache_entries(tmp_path: Path):

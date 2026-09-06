@@ -69,7 +69,7 @@ def test_pitch_is_preserved_while_duration_matches_authoritative_window():
 
 
 def test_transform_is_repeatable_for_same_pcm_and_plan():
-    plan = _plan(bpm_a=120.0, bpm_b=90.0)
+    plan = _plan(bpm_a=120.0, bpm_b=100.0)
     timeline = np.arange(4 * SAMPLE_RATE, dtype=np.float64) / SAMPLE_RATE
     source = np.sin(2.0 * np.pi * 330.0 * timeline)
 
