@@ -103,7 +103,7 @@ class TransformedSampleMapping:
     The mapping is affine over sample *boundaries*.  It maps source boundary
     ``source_span.start`` to transformed boundary ``transformed_span.start``
     and the source end boundary to the transformed end boundary.  Mapping an
-    interior source boundary floors the interpolated transformed position;
+    interior source boundary floors the exact rational transformed position;
     the two complete-span endpoints remain exact so the half-open contract is
     preserved.  This object describes indices only; it does not transform
     audio and is not a continuous beat-grid correction.
@@ -143,7 +143,12 @@ class TransformedSampleMapping:
         if boundary == self.source_span.end:
             return self.transformed_span.end
         relative = boundary - self.source_span.start
-        return self.transformed_span.start + math.floor(relative * self.scale)
+        # Keep boundary interpolation exact.  Evaluating the equivalent float
+        # expression can underflow an integral result by one sample before
+        # floor(), even though all three quantities are integers.
+        return self.transformed_span.start + (
+            relative * self.transformed_count
+        ) // self.source_count
 
     def map_source_span(self, source_span: SampleSpan) -> SampleSpan:
         """Map a contained source span using half-open boundary semantics."""
