@@ -25,11 +25,16 @@ from .audio.analysis import analyse
 from .audio.decode import to_wav
 from .audio.features import SCHEMA_VERSION, MusicFeatures
 from .audio.mixer import execute_transition
-from .audio.phase_corrected_material import phase_correct_incoming_transition
+from .audio.beat_phase import BeatPhaseRelationship
+from .audio.phase_corrected_material import (
+    phase_correct_incoming_transition,
+    phase_correct_incoming_transition_with_relationship,
+)
 from .audio.tempo_match import (
     SUPPORTED_PLAYBACK_RATE_MAX,
     SUPPORTED_PLAYBACK_RATE_MIN,
     TempoMatch,
+    stretch_incoming_transition,
     tempo_match,
 )
 from .deck import TrackDeck
@@ -44,7 +49,7 @@ from .transition import (
 )
 
 PathLike: TypeAlias = Path | str
-PreviewMode: TypeAlias = Literal["no-stretch", "bpm-matched"]
+PreviewMode: TypeAlias = Literal["no-stretch", "bpm-matched", "phase-aligned"]
 
 ROOT = Path(__file__).resolve().parents[2]
 ANALYSIS_DIR = ROOT / "out" / "analysis"
@@ -83,6 +88,20 @@ class TransitionMappingDiagnostics:
     residual_end_drift_outgoing_beats: float | None
     residual_end_drift_incoming_beats: float | None
     incoming_playback_rate: float
+    outgoing_anchor_time_seconds: float | None = None
+    incoming_anchor_time_seconds: float | None = None
+    outgoing_anchor_sample_position: float | None = None
+    incoming_anchor_sample_position: float | None = None
+    transformed_anchor_sample_position: float | None = None
+    initial_phase_offset_samples: float | None = None
+    initial_phase_offset_seconds: float | None = None
+    initial_phase_offset_beats: float | None = None
+    initial_correction_samples: int | None = None
+    initial_correction_seconds: float | None = None
+    residual_phase_offset_samples: float | None = None
+    residual_phase_offset_seconds: float | None = None
+    residual_phase_offset_beats: float | None = None
+    phase_relationship: BeatPhaseRelationship | None = None
 
     @property
     def end_drift_seconds(self) -> float:
@@ -113,6 +132,71 @@ class TransitionMappingDiagnostics:
     def predicted_end_drift_incoming_beats(self) -> float | None:
         """Compatibility spelling for the post-transform residual."""
         return self.residual_end_drift_incoming_beats
+
+    @property
+    def phase_error_before_samples(self) -> float | None:
+        """Signed initial cue error measured from the supplied beat grids."""
+        return self.initial_phase_offset_samples
+
+    @property
+    def phase_error_after_samples(self) -> float | None:
+        """Signed cue error remaining after the integer correction."""
+        return self.residual_phase_offset_samples
+
+    @property
+    def phase_error_before_seconds(self) -> float | None:
+        """Initial cue error in seconds at the shared PCM rate."""
+        return self.initial_phase_offset_seconds
+
+    @property
+    def phase_error_after_seconds(self) -> float | None:
+        """Remaining cue error in seconds at the shared PCM rate."""
+        return self.residual_phase_offset_seconds
+
+    @property
+    def phase_error_before_beats(self) -> float | None:
+        """Initial cue error in outgoing nominal beat units."""
+        return self.initial_phase_offset_beats
+
+    @property
+    def phase_error_after_beats(self) -> float | None:
+        """Remaining cue error in outgoing nominal beat units."""
+        return self.residual_phase_offset_beats
+
+    @property
+    def signed_offset_samples(self) -> float | None:
+        """Alias for the phase contract's pre-correction signed offset."""
+        return self.initial_phase_offset_samples
+
+    @property
+    def residual_offset_samples(self) -> float | None:
+        """Alias for the phase contract's post-correction signed offset."""
+        return self.residual_phase_offset_samples
+
+    @property
+    def phase_correction_samples(self) -> int | None:
+        """Alias naming the applied initial correction explicitly."""
+        return self.initial_correction_samples
+
+    @property
+    def outgoing_cue_time_seconds(self) -> float | None:
+        """The outgoing cue timestamp read from its BeatTimeline."""
+        return self.outgoing_anchor_time_seconds
+
+    @property
+    def incoming_cue_time_seconds(self) -> float | None:
+        """The incoming cue timestamp read from its BeatTimeline."""
+        return self.incoming_anchor_time_seconds
+
+    @property
+    def correction_samples(self) -> int | None:
+        """The deterministic initial incoming sample correction."""
+        return self.initial_correction_samples
+
+    @property
+    def correction_seconds(self) -> float | None:
+        """The deterministic initial incoming correction in seconds."""
+        return self.initial_correction_seconds
 
 
 @dataclass(frozen=True)
@@ -163,6 +247,62 @@ class TransitionPreviewDiagnostics:
     def transition_duration_seconds(self) -> float:
         return self.before.transition_duration_seconds
 
+    @property
+    def phase_before(self) -> BeatPhaseRelationship | None:
+        """Actual cue-to-sample phase measured before correction."""
+        if self.after is None:
+            return None
+        return self.after.phase_relationship
+
+    @property
+    def phase_after_samples(self) -> float | None:
+        """Residual initial phase after the matched material correction."""
+        if self.after is None:
+            return None
+        return self.after.residual_phase_offset_samples
+
+    @property
+    def phase_before_samples(self) -> float | None:
+        """Initial phase error before the matched material correction."""
+        if self.after is None:
+            return None
+        return self.after.initial_phase_offset_samples
+
+    @property
+    def phase_correction_samples(self) -> int | None:
+        """Initial integer correction applied to the incoming material."""
+        if self.after is None:
+            return None
+        return self.after.initial_correction_samples
+
+    @property
+    def phase_before_seconds(self) -> float | None:
+        """Initial phase error in seconds at the matched sample rate."""
+        if self.after is None:
+            return None
+        return self.after.initial_phase_offset_seconds
+
+    @property
+    def phase_after_seconds(self) -> float | None:
+        """Residual phase error in seconds at the matched sample rate."""
+        if self.after is None:
+            return None
+        return self.after.residual_phase_offset_seconds
+
+    @property
+    def phase_before_beats(self) -> float | None:
+        """Initial phase error in outgoing nominal beat units."""
+        if self.after is None:
+            return None
+        return self.after.initial_phase_offset_beats
+
+    @property
+    def phase_after_beats(self) -> float | None:
+        """Residual phase error in outgoing nominal beat units."""
+        if self.after is None:
+            return None
+        return self.after.residual_phase_offset_beats
+
     def __getattr__(self, name: str) -> object:
         """Keep direct access to fields added to ``TransitionDiagnostics``."""
         return getattr(self.before, name)
@@ -198,6 +338,13 @@ class TransitionPreviewReport:
     def matched_diagnostics(self) -> TransitionMappingDiagnostics | None:
         """Alias for the BPM-matched after diagnostic."""
         return self.after_diagnostics
+
+    @property
+    def phase_relationship(self) -> BeatPhaseRelationship | None:
+        """The actual cue-to-sample relationship used for matched material."""
+        if self.after_diagnostics is None:
+            return None
+        return self.after_diagnostics.phase_relationship
 
 
 def _feature_cache_path(track: Path, cache_dir: Path) -> Path:
@@ -350,9 +497,9 @@ def _validate_compatible_pcm(
 
 def _validate_preview_mode(mode: str) -> PreviewMode:
     """Validate the explicit source-clock policy used by a preview."""
-    if mode not in ("no-stretch", "bpm-matched"):
+    if mode not in ("no-stretch", "bpm-matched", "phase-aligned"):
         raise TransitionPreviewError(
-            "preview mode must be one of: no-stretch, bpm-matched"
+            "preview mode must be one of: no-stretch, bpm-matched, phase-aligned"
         )
     return mode
 
@@ -363,6 +510,7 @@ def _matched_mapping_diagnostics(
     outgoing_timeline: object,
     incoming_timeline: object,
     transformed_sample_count: int | None = None,
+    phase_relationship: BeatPhaseRelationship | None = None,
 ) -> TransitionMappingDiagnostics:
     """Measure the post-transform window from its actual sample counts."""
     # Importing the concrete timeline type only for the optional beat-unit
@@ -387,6 +535,54 @@ def _matched_mapping_diagnostics(
         if incoming_interval > 0.0
         else None
     )
+    phase_values: dict[str, object] = {}
+    if phase_relationship is not None:
+        phase_values = {
+            "outgoing_anchor_time_seconds": (
+                phase_relationship.outgoing_anchor.cue_time_seconds
+            ),
+            "incoming_anchor_time_seconds": (
+                phase_relationship.incoming_anchor.cue_time_seconds
+            ),
+            "outgoing_anchor_sample_position": (
+                phase_relationship.outgoing_anchor.sample_position
+            ),
+            "incoming_anchor_sample_position": (
+                phase_relationship.incoming_anchor.sample_position
+            ),
+            "transformed_anchor_sample_position": (
+                phase_relationship.transformed_mapping.transformed_span.start
+                + phase_relationship.incoming_anchor.fractional_sample_offset
+                * phase_relationship.transformed_mapping.scale
+            ),
+            "initial_phase_offset_samples": (
+                phase_relationship.signed_offset_samples
+            ),
+            "initial_phase_offset_seconds": (
+                phase_relationship.signed_offset_seconds
+            ),
+            "initial_phase_offset_beats": phase_relationship.signed_offset_beats,
+            "initial_correction_samples": (
+                phase_relationship.initial_correction_samples
+            ),
+            "initial_correction_seconds": (
+                phase_relationship.initial_correction_seconds
+            ),
+            "residual_phase_offset_samples": (
+                phase_relationship.residual_offset_samples
+            ),
+            "residual_phase_offset_seconds": (
+                phase_relationship.residual_offset_samples / sample_rate
+            ),
+            "residual_phase_offset_beats": (
+                phase_relationship.residual_offset_samples
+                / sample_rate
+                / outgoing_interval
+                if outgoing_interval > 0.0
+                else None
+            ),
+            "phase_relationship": phase_relationship,
+        }
     return TransitionMappingDiagnostics(
         sample_rate=sample_rate,
         source_sample_count=match.incoming_sample_count,
@@ -399,6 +595,7 @@ def _matched_mapping_diagnostics(
         residual_end_drift_outgoing_beats=outgoing_beats,
         residual_end_drift_incoming_beats=incoming_beats,
         incoming_playback_rate=match.incoming_playback_rate,
+        **phase_values,
     )
 
 
@@ -476,8 +673,10 @@ def _render_transition_preview(
     """Render once and retain the exact plan used for the CLI report.
 
     ``no-stretch`` keeps the Phase 4C source mapping.  ``bpm-matched`` applies
-    the documented pitch-preserving transform to only the incoming plan
-    window before invoking the same executor.
+    the documented pitch-preserving transform and the established initial
+    sample correction to only the incoming plan window before invoking the
+    same executor.  ``phase-aligned`` is the explicit spelling for that
+    corrected offline path.
     """
     mode = _validate_preview_mode(mode)
     outgoing_path, incoming_path, output_path = _validated_paths(
@@ -502,18 +701,33 @@ def _render_transition_preview(
     mixer_plan = plan
     mixer_incoming = incoming_pcm[0]
     matched_mapping: TransitionMappingDiagnostics | None = None
-    if mode == "bpm-matched":
+    if mode in ("bpm-matched", "phase-aligned"):
         try:
             match = tempo_match(plan, sample_rate)
             outgoing_timeline = TrackDeck.from_features(outgoing_features).timeline
             incoming_timeline = TrackDeck.from_features(incoming_features).timeline
-            mixer_incoming = phase_correct_incoming_transition(
-                incoming_pcm[0],
-                plan,
-                sample_rate,
-                outgoing_timeline,
-                incoming_timeline,
-            )
+            try:
+                mixer_incoming, phase_relationship = (
+                    phase_correct_incoming_transition_with_relationship(
+                        incoming_pcm[0],
+                        plan,
+                        sample_rate,
+                        outgoing_timeline,
+                        incoming_timeline,
+                    )
+                )
+            except ValueError as exc:
+                # A planner may name a virtual bar-grid position after the
+                # last detected cue.  BPM matching remains valid there, but
+                # an actual cue-to-sample phase measurement is unavailable.
+                # Keep the render deterministic and leave the phase fields
+                # empty instead of presenting a virtual anchor as detected.
+                if "plan anchor is not a detected timeline cue" not in str(exc):
+                    raise
+                mixer_incoming = stretch_incoming_transition(
+                    incoming_pcm[0], plan, sample_rate
+                )
+                phase_relationship = None
         except ValueError as exc:
             if "outside the supported range" in str(exc):
                 raise IncompatiblePCMError(str(exc)) from exc
@@ -540,6 +754,7 @@ def _render_transition_preview(
                 - incoming_pcm[0].shape[0]
                 + match.incoming_sample_count
             ),
+            phase_relationship=phase_relationship,
         )
     try:
         mixed = execute_transition(
@@ -693,22 +908,46 @@ def format_preview_summary(report: TransitionPreviewReport) -> str:
         "must match in sample rate and channel count; no resampling or "
         "channel conversion is performed",
     ]
-    if report.mode == "bpm-matched":
+    if report.mode in ("bpm-matched", "phase-aligned"):
         assert report.after_diagnostics is not None
         matched = report.after_diagnostics
+        mapping_label = (
+            "phase-aligned BPM-matched sample mapping"
+            if report.mode == "phase-aligned"
+            else "BPM-matched sample mapping"
+        )
         lines.extend(
             (
-                "drift (BPM-matched sample mapping): "
+                f"drift ({mapping_label}): "
                 f"residual end {_signed(matched.residual_end_drift_seconds, 's')} "
                 f"({_signed(matched.residual_end_drift_outgoing_beats, 'outgoing beats')}); "
                 f"incoming window {matched.source_sample_count} -> "
                 f"{matched.transformed_sample_count} samples at "
                 f"{matched.incoming_playback_rate:.6f}x",
-                "BPM-match policy: pitch-preserving incoming-window transform only; "
-                f"playback rate must remain within the inclusive range "
-                f"[{SUPPORTED_PLAYBACK_RATE_MIN}, {SUPPORTED_PLAYBACK_RATE_MAX}]; "
-                "anchor phase is unchanged and semantic alignment is not claimed",
             )
+        )
+        if matched.phase_relationship is None:
+            lines.append(
+                "phase mapping: unavailable because one or both selected anchors "
+                "are virtual BeatTimeline positions"
+            )
+        else:
+            lines.append(
+                "phase mapping: "
+                f"cues {matched.outgoing_anchor_time_seconds:.6f}s -> "
+                f"{matched.incoming_anchor_time_seconds:.6f}s; "
+                f"before {_signed(matched.initial_phase_offset_samples, 'samples')} "
+                f"({_signed(matched.initial_phase_offset_beats, 'outgoing beats')}); "
+                f"correction {_signed(matched.initial_correction_samples, 'samples')}; "
+                f"after {_signed(matched.residual_phase_offset_samples, 'samples')} "
+                f"({_signed(matched.residual_phase_offset_beats, 'outgoing beats')})"
+            )
+        lines.append(
+            "BPM-match policy: pitch-preserving incoming-window transform only; "
+            f"playback rate must remain within the inclusive range "
+            f"[{SUPPORTED_PLAYBACK_RATE_MIN}, {SUPPORTED_PLAYBACK_RATE_MAX}]; "
+            "initial sample correction is deterministic and semantic alignment "
+            "is not claimed"
         )
         lines.append(
             "limits: outgoing source frames remain one-for-one; only the incoming "
@@ -744,7 +983,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--mode",
-        choices=("no-stretch", "bpm-matched"),
+        choices=("no-stretch", "bpm-matched", "phase-aligned"),
         default="no-stretch",
         help="incoming timing mode (default: %(default)s)",
     )
@@ -754,6 +993,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_const",
         const="bpm-matched",
         help="shortcut for --mode bpm-matched",
+    )
+    parser.add_argument(
+        "--phase-aligned",
+        "--phase-align",
+        dest="mode",
+        action="store_const",
+        const="phase-aligned",
+        help="shortcut for --mode phase-aligned",
     )
     args = parser.parse_args(argv)
 
