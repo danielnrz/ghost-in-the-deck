@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from ghost_in_the_deck.audio.metric_primitives import (
     measure_transient_interference,
     rms_energy,
 )
-from synthetic import run_synthetic_preview_matrix
+from ghost_in_the_deck.transition_preview import _render_transition_preview
 
 SCHEMA_VERSION = 1
 MODES = ("no-stretch", "bpm-matched", "phase-aligned")
@@ -33,6 +34,67 @@ LIMITATIONS = (
     "The report is observational; synthetic scores never gate or alter application behavior.",
     "Only the bounded transition window is evaluated, not a complete musical mix.",
 )
+
+
+@dataclass(frozen=True)
+class _SyntheticPreviewCase:
+    mode: str
+    output_path: Path
+    report: Any
+
+
+def _burst(frequency: float, seconds: float, falloff: float, sample_rate: int) -> np.ndarray:
+    time = np.arange(int(seconds * sample_rate)) / sample_rate
+    return (np.sin(2 * np.pi * frequency * time) * np.exp(-falloff * time)).astype(np.float32)
+
+
+def _make_beat_track(path: Path, *, bpm: float, seconds: float, sample_rate: int = 22050) -> Path:
+    """Write a deterministic, broadband generated source for one evaluation."""
+    samples = np.zeros(int(seconds * sample_rate), dtype=np.float32)
+    layers = (
+        0.9 * _burst(55.0, 0.18, 26.0, sample_rate),
+        0.25 * _burst(420.0, 0.07, 55.0, sample_rate),
+        0.18 * _burst(4200.0, 0.03, 160.0, sample_rate),
+    )
+    interval = 60.0 / bpm
+    time = 0.0
+    while time < seconds - 0.25:
+        start = int(time * sample_rate)
+        for layer in layers:
+            samples[start : start + layer.size] += layer[: samples.size - start]
+        time += interval
+    rng = np.random.default_rng(7)
+    samples += rng.normal(0.0, 0.002, samples.size).astype(np.float32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(path, np.clip(samples, -1.0, 1.0), sample_rate)
+    return path
+
+
+def _run_synthetic_preview_matrix(output_dir: Path, *, seconds: float) -> list[_SyntheticPreviewCase]:
+    """Render the frozen preview matrix using only locally generated WAV sources."""
+    sources = output_dir / "sources"
+    analysis = output_dir / "analysis"
+    outgoing = _make_beat_track(sources / "outgoing.wav", bpm=OUTGOING_BPM, seconds=seconds)
+    incoming = _make_beat_track(sources / "incoming.wav", bpm=INCOMING_BPM, seconds=seconds)
+    source_bytes = (outgoing.read_bytes(), incoming.read_bytes())
+    cases: list[_SyntheticPreviewCase] = []
+    for mode in MODES:
+        output = output_dir / "previews" / f"{mode}.wav"
+        report = _render_transition_preview(
+            outgoing,
+            incoming,
+            output,
+            refresh=False,
+            analysis_dir=analysis,
+            margin_seconds=16.0,
+            limit_per_deck=5,
+            transition_bars=8,
+            mode=mode,
+        )
+        cases.append(_SyntheticPreviewCase(mode, output, report))
+    if (outgoing.read_bytes(), incoming.read_bytes()) != source_bytes:
+        raise AssertionError("synthetic preview modified a source WAV")
+    return cases
 
 
 def _number(value: float | int | None) -> float | int | None:
@@ -131,7 +193,7 @@ def _case_record(case: Any, *, outgoing_bpm: float, incoming_bpm: float) -> dict
 
 def evaluate(out_dir: Path, *, seconds: float = 40.0) -> dict[str, Any]:
     """Render and aggregate the fixed three-mode synthetic evaluation matrix."""
-    cases = run_synthetic_preview_matrix(out_dir, seconds=seconds)
+    cases = _run_synthetic_preview_matrix(out_dir, seconds=seconds)
     records = [_case_record(case, outgoing_bpm=OUTGOING_BPM, incoming_bpm=INCOMING_BPM) for case in cases]
     records.sort(key=lambda item: MODES.index(item["mode"]))
     return {
