@@ -78,6 +78,24 @@ def test_git_guard_passes_for_the_checked_out_branch():
     assert "Git Guard: PASS" in result.stdout
 
 
+def test_private_audio_and_evaluation_outputs_are_ignored():
+    for path in ("testMusic/private.wav", "out/evaluation/probe.wav"):
+        result = subprocess.run(
+            ["git", "check-ignore", "--quiet", path],
+            cwd=ROOT,
+        )
+        assert result.returncode == 0, path
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "testMusic", "out"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert tracked in ([], ["testMusic/.gitkeep"])
+
+
 def test_mapping_contract_is_half_open_at_both_boundaries():
     mapping = TransformedSampleMapping(
         source_span=SampleSpan(10, 20),
