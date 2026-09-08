@@ -177,24 +177,22 @@ def load_features(track: Path, refresh: bool = False) -> MusicFeatures:
     A cache written by an older schema is re-analysed rather than loaded, since
     it predates fields the groove now needs.
     """
-    cached = ANALYSIS_DIR / f"{track.stem}.json"
-    if cached.is_file() and not refresh:
-        stored = json.loads(cached.read_text())
-        if int(stored.get("schema_version", 0)) >= SCHEMA_VERSION:
-            return MusicFeatures.from_dict(stored)
-    features = analyse(track)
-    features.save(cached)
-    return features
+    from .library import cached_analysis
+    return cached_analysis(track, ANALYSIS_DIR, refresh)
+
 
 
 def build_app(args) -> "GhostApp":
     if args.headless:
         loadPrcFileData("", "window-type offscreen")
     loadPrcFileData("", "win-size 1280 720")
-    loadPrcFileData("", "window-title Ghost in the Deck - Phase 0")
+    loadPrcFileData("", "window-title Ghost in the Deck")
     if args.no_audio:
         loadPrcFileData("", "audio-library-name null")
-    return GhostApp(args)
+    if getattr(args, "single_track", False) or args.show_action:
+        return GhostApp(args)
+    from .dj_app import LiveDJApp
+    return LiveDJApp(args)
 
 
 class GhostApp:
@@ -399,8 +397,16 @@ class GhostApp:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ghost in the Deck - Phase 0 prototype")
+    parser = argparse.ArgumentParser(description="Ghost in the Deck - autonomous local DJ")
     parser.add_argument("--music-dir", default=str(DEFAULT_MUSIC_DIR))
+    from .library import DEFAULT_CACHE
+    parser.add_argument("--demo", action="store_true", help="play three synthesized demo tracks")
+    parser.add_argument("--single-track", action="store_true", help="legacy single-track diagnostic mode")
+    parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE))
+    parser.add_argument("--transition-bars", type=positive_int, default=4)
+    parser.add_argument("--dwell", type=float, default=20, help="minimum solo seconds before another transition")
+    parser.add_argument("--capture-at", type=float, nargs="*", default=[], help="save rendered frames at set times")
+    parser.add_argument("--capture-dir", default=str(ROOT / "out" / "set_review"))
     parser.add_argument("--track", help="substring of the filename to play")
     parser.add_argument("--seconds", type=float, help="stop after this many seconds")
     parser.add_argument("--headless", action="store_true", help="render offscreen")
@@ -476,7 +482,32 @@ def main() -> None:
         # plays the full track exactly as before.
         args.seconds = SHOW_ACTION_PREVIEW_SECONDS
 
-    app = build_app(args)
+    import math
+    for name in ("seconds", "dwell", "simulate_stall", "stall_every"):
+        value = getattr(args, name)
+        if value is not None and (not math.isfinite(value) or value < 0):
+            parser.error(f"--{name.replace(chr(95), chr(45))} must be finite and non-negative")
+    if any(not math.isfinite(t) or t < 0 for t in args.capture_at):
+        parser.error("capture times must be finite and non-negative")
+    args.capture_at.sort()
+    demo_directory = None
+    if args.demo:
+        import tempfile
+        from .demo import create_demo
+        demo_directory = tempfile.TemporaryDirectory(prefix="ghost-demo-")
+        args.music_dir = str(create_demo(Path(demo_directory.name)))
+        args.cache_dir = str(Path(demo_directory.name)/"cache")
+    try:
+        app = build_app(args)
+    except (ValueError, OSError, RuntimeError) as exc:
+        parser.exit(1, f"Cannot start DJ: {exc}\n")
+    if not (args.single_track or args.show_action):
+        try:
+            app.run()
+        finally:
+            if demo_directory is not None:
+                demo_directory.cleanup()
+        return
     print(f"track : {app.track.name}")
     print(f"bpm   : {app.features.bpm:.2f}   beats: {len(app.features.beats)}")
     recorder = app.run()
