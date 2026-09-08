@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -35,16 +36,49 @@ def main():
             spans = [s for s in app.ledger.spans if s.plan]
             if len(spans) < 2:
                 raise RuntimeError('demo did not produce two matched transitions')
+            # Real analyzed demo energy chooses low/high solo examples. Then
+            # render whole approach/action/recovery sequences in both directions.
+            app.visual.update(app.ledger.spans)
+            samples = [t/4 for t in range(16, int(spans[0].start/44100-4)*4)]
+            solo = app.ledger.spans[0]
+            low = min(samples, key=lambda t: app._groove_state(solo.active,t).intensity)
+            high = max(samples, key=lambda t: app._groove_state(solo.active,t).intensity)
+            scenarios = {'solo-low': [low+i/6 for i in range(7)],
+                         'solo-high': [high+i/6 for i in range(7)]}
             for i, span in enumerate(spans):
-                for phase in (.05, .3, .55, .85, 1.01):
-                    now = (span.start + (span.end-span.start)*phase)/44100
+                start, end = span.start/44100, span.end/44100
+                scenarios[f'transition-{i+1}-reach'] = [start-2.4+j/6 for j in range(31)]
+                scenarios[f'transition-{i+1}-middle'] = [(start+end)/2+j/6 for j in range(4)]
+                scenarios[f'transition-{i+1}-handoff'] = [end-.6+j/6 for j in range(22)]
+                scenarios[f'transition-{i+1}-boundary'] = [end-1/60,end,end+1/60]
+            for i, intent in enumerate(app.visual.interactions):
+                if intent.operation != 'crossfade':
+                    scenarios[f'effect-{i+1}'] = [intent.begin+j/6 for j in range(int((intent.end-intent.begin)*6)+1)]
+            manifest = []
+            for name, times in scenarios.items():
+                for index, now in enumerate(times):
                     app.draw_at(now)
                     app.rig.force_update()
                     app.base.graphicsEngine.renderFrame()
                     app.base.graphicsEngine.renderFrame()
-                    path = options.out_dir/f'transition-{i+1}-{phase:.2f}.png'
+                    path = options.out_dir/f'{name}-{index:03}.png'
                     app.base.win.saveScreenshot(str(path))
-                    print(path)
+                    _, intent, action = app.pose_at(now)
+                    manifest.append(dict(file=path.name,time=now,scenario=name,
+                        intent=intent.kind,operation=intent.operation,deck=intent.deck,
+                        phase=intent.phase_at(now) if action else 'monitor/groove'))
+            (options.out_dir/'frames.json').write_text(json.dumps(manifest,indent=2))
+            # Compact replayable behavior record spanning the entire actual set.
+            timeline=[]
+            for tick in range(int(app.ledger.frames/44100*10)):
+                now=tick/10; span=app.ledger.at(now)
+                intent=app.visual.at(now,span.deck); action=intent.action_at(now)
+                timeline.append(dict(time=now,audio='mix' if span.plan else 'solo',
+                    active_deck=span.deck,operation=intent.operation,intent=intent.kind,
+                    hand=action.side if action else None,
+                    phase=intent.phase_at(now) if action else 'monitor/groove'))
+            (options.out_dir/'timeline.json').write_text(json.dumps(timeline,indent=2))
+            print(f'Rendered {len(manifest)} frames; {len(timeline)} timeline samples')
         finally:
             app._finish()
             app.base.destroy()
