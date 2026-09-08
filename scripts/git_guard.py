@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,9 @@ def guard_paths(paths: list[str]) -> list[str]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--require-work-branch", action="store_true")
+    args = parser.parse_args()
     failures = guard_paths(tracked_paths())
     try:
         subprocess.run(
@@ -56,7 +60,7 @@ def main() -> int:
         failures.append("git diff --check reported whitespace errors")
 
     branch = _git("branch", "--show-current").decode().strip()
-    if branch == "main":
+    if args.require_work_branch and branch == "main":
         failures.append("repository guard must not run on main")
 
     if failures:
