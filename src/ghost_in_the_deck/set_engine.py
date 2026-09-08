@@ -78,6 +78,8 @@ class DeckSpan:
     incoming: LibraryTrack | None = None
     plan: TransitionPlan | None = None
     phase_correction: int = 0
+    # Exact planner records whose DSP was rendered into this source PCM.
+    audio_actions: tuple = ()
 
     def source_seconds(self, absolute_frame: int) -> float:
         return (self.source_start + max(0, min(absolute_frame, self.end)-self.start))/SAMPLE_RATE
@@ -120,6 +122,7 @@ class SetEngine:
         self.errors = list(library.errors)
         self.handoffs = []
         self._started = False
+        self._audio_actions = {}
 
     def _load(self, track: LibraryTrack) -> np.ndarray:
         pcm = load_pcm(track.path)
@@ -135,6 +138,7 @@ class SetEngine:
                   for a in actions if a.action == 'filter_sweep']
         risers = [GestureEvent(a.start, a.duration, 'small_hype', a.side, a.strength)
                   for a in actions if a.action == 'gain_riser']
+        self._audio_actions[track.path] = tuple(actions)
         pcm = apply_hand_to_deck_effects(pcm, SAMPLE_RATE, sweeps)
         return bounded_pcm(apply_small_hype_effects(pcm, SAMPLE_RATE, risers))
 
@@ -195,7 +199,8 @@ class SetEngine:
                 stop = frame(plan.outgoing_time)
                 solo = pcm[source_start:stop]
                 if len(solo):
-                    yield Segment(DeckSpan(absolute, absolute+len(solo), active, source_start, side), solo)
+                    yield Segment(DeckSpan(absolute, absolute+len(solo), active, source_start, side,
+                        audio_actions=self._audio_actions.get(active.path, ())), solo)
                     absolute += len(solo)
                 span = DeckSpan(absolute, absolute+len(mixed), active, stop, side,
                                candidate.track, plan, phase.initial_correction_samples)
@@ -212,7 +217,8 @@ class SetEngine:
             fade = min(frame(.05), len(solo))
             if fade:
                 solo[-fade:] *= np.linspace(1, 0, fade)[:, None]
-                yield Segment(DeckSpan(absolute, absolute+len(solo), active, source_start, side), solo)
+                yield Segment(DeckSpan(absolute, absolute+len(solo), active, source_start, side,
+                        audio_actions=self._audio_actions.get(active.path, ())), solo)
                 absolute += len(solo)
             next_track = None
             while remaining:

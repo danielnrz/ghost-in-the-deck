@@ -1,60 +1,79 @@
 """The normal local-library DJ runtime, using the shared set execution engine."""
 from __future__ import annotations
 
+from dataclasses import replace
 import queue
 import time
 from pathlib import Path
 
 from .animation.controller import AvatarAnimator
-from .animation.dj_behavior import DJActionState, DJBehaviorEngine, _envelope_weight
-from .animation.groove import GrooveEngine
+from .animation.dj_behavior import DJActionState, _smoothstep
+from .animation.visual_intent import VisualTimeline, deck_label, HANDOFF_RECOVERY
+from .animation.energy import EnergyTrack
+from .animation.structure import PHRASE_SMOOTHING_SECONDS
+from .animation.groove import GrooveEngine, GrooveVariation
 from .animation.rig import AvatarRig
 from .clock import PlaybackClock
-from .library import DEFAULT_CACHE, load_library
+from .library import load_library
 from .live import SetBuffer, StreamLedger
 from .scene.workstation import build_workstation
 from .set_engine import SAMPLE_RATE, SetEngine, frame
 
 
 def transition_action(span, absolute_time: float) -> DJActionState | None:
-    if span.plan is None:
-        return None
-    progress = (absolute_time*SAMPLE_RATE-span.start)/(span.end-span.start)
-    if not 0 <= progress <= 1:
-        return None
-    # Hold the calibrated contact pose during the body of the crossfade.
-    # The original gesture only touches briefly; remap its approach/release
-    # without changing any calibrated joint targets or clearance trajectory.
-    progress = progress * 2.5 if progress < .2 else (.5 if progress <= .8 else .5+(progress-.8)*2.5)
-    return DJActionState(time=absolute_time, action='hand_to_deck', progress=progress,
-        weight=_envelope_weight('hand_to_deck', progress),
-        side='r' if span.deck == 'l' else 'l', strength=1.0)
+    """Diagnostic convenience using the same admitted choreography as live sets."""
+    visual = VisualTimeline()
+    visual.update([span])
+    return visual.at(absolute_time, span.deck).action_at(absolute_time)
 
 
-def solo_action(behavior, source_time: float, source_start: float, source_end: float):
-    # Do not jump into or cut off a partly elapsed solo gesture at a handoff.
-    # The audio planner's schedule remains unchanged; only complete visible
-    # gestures inside this deck-owned solo interval are represented here.
-    for event in behavior.events:
-        if event.start <= source_time < event.start + event.duration:
-            if event.start < source_start or event.start + event.duration > source_end:
-                return None
-            return behavior.state_at(source_time)
-    return None
+def set_pose_offsets(animator, state, action):
+    offsets = animator.pose_offsets(state)
+    if action is None or not action.is_active:
+        return offsets
+    if action.action != 'hand_to_deck':
+        return animator.pose_offsets(state, action)
+    side = action.side
+    sign = 1 if side == 'l' else -1
+    # The settled middle fingertip is over the real knob, 13 mm above its
+    # top. Panel knobs share a world-X offset, so these solves are asymmetric.
+    contact = {
+        'l': ((-9.584,.003,-28.823),(14.947,46.631,15),(0,33.841,-19.987)),
+        'r': ((9.539,-2.839,32.513),(-13.332,45.463,-13.148),(0,33.777,20)),
+    }[side]
+    # Elbow first: fold the forearm behind the near edge, then carry the bent
+    # arm above the controls, then settle. No broad lateral shoulder detour.
+    # Each leg has zero endpoint velocity; reverse the same safe path to leave.
+    u = 2*min(action.progress,1-action.progress)
+    neutral = ((0,0,0),(0,0,0),(0,0,0))
+    tuck = ((0,0,0),(0,-55,0),(0,0,0))
+    above = ((contact[0][0],contact[0][1],-46*sign),(0,-55,0),(0,60,-20*sign))
+    extended = (above[0],contact[1],above[2])
+    if u < .25:
+        a,b,w = neutral,tuck,_smoothstep(u/.25)
+    elif u < .45:
+        a,b,w = tuck,above,_smoothstep((u-.25)/.20)
+    elif u < .78:
+        a,b,w = above,extended,_smoothstep((u-.45)/.33)
+    else:
+        a,b,w = extended,contact,_smoothstep((u-.78)/.22)
+    presence = _smoothstep(u/.25)
+    for joint, first, last in zip(('upperarm','lowerarm','hand'),a,b):
+        name=f'{joint}_{side}'
+        motion=tuple(x+(y-x)*w for x,y in zip(first,last))
+        groove=offsets.get(name,(0,0,0))
+        offsets[name]=tuple(x+y*(1-presence) for x,y in zip(motion,groove))
+    for joint in ('pelvis','spine_01','spine_02','spine_03'):
+        offsets[joint]=tuple(v*(1-presence) for v in offsets.get(joint,(0,0,0)))
+    name=f'clavicle_{side}'
+    offsets[name]=tuple(a*(1-presence)+b*presence for a,b in zip(offsets.get(name,(0,0,0)),(0,-3,0)))
+    return offsets
 
 
 def write_set_pose(animator, state, action, *, transition=False):
-    animator._write_pose(state, action)
-    if transition and action is not None and action.is_active:
-        from .animation.gesture_pose import _reach_phase_weights
-        _, target, lift, _ = _reach_phase_weights(action.progress)
-        contact = target*(1-lift)
-        joint = f'hand_{action.side}'
-        h, p, r = animator.rig.offset_of(joint)
-        # During the settled control interval, orient the fingers along the
-        # control row. Keep the accepted lifted wrist on approach and release.
-        animator.rig.set_offset(joint, heading=h, pitch=p-32*contact,
-            roll=r+(-8 if action.side == 'l' else 8)*contact)
+    animator.rig.reset()
+    for name, (h, p, r) in set_pose_offsets(animator, state, action).items():
+        animator.rig.set_offset(name, heading=h, pitch=p, roll=r)
 
 
 class LiveDJApp:
@@ -76,7 +95,8 @@ class LiveDJApp:
         self.closed = False
         self._ran = False
         self._grooves = {}
-        self._behaviors = {}
+        self._broad_energy = {}
+        self.visual = VisualTimeline()
         self._last_track = None
         self._next_stall_at = args.stall_every or None
         self._capture_times = list(args.capture_at)
@@ -100,8 +120,21 @@ class LiveDJApp:
             # A raised view makes both control rows and hand clearance visible.
             low, high = self.rig.actor.getTightBounds()
             height = high.z-low.z
+            import math
+            distance = height*2.3
+            self.base.camera.setX(math.sin(math.radians(16))*distance)
+            self.base.camera.setY(-math.cos(math.radians(16))*distance)
             self.base.camera.setZ(height*1.12)
             self.base.camera.lookAt(0, -.25, height*.52)
+            from .animation.workstation import DEFAULT_TARGETS
+            for side in ('l', 'r'):
+                label = TextNode(f'deck-label-{side}')
+                label.setText(deck_label(side))
+                label.setAlign(TextNode.ACenter)
+                label.setTextColor(.75,.82,.9,1)
+                node = self.workstation.attachNewNode(label)
+                node.setScale(.04)
+                node.setPos(DEFAULT_TARGETS.deck_for(side)[0], -.59, .925)
             self.animator = AvatarAnimator(self.rig)
             self.status = OnscreenText(text='Preparing set', pos=(-1.7, .92), scale=.042,
                 fg=(.85, .92, 1, 1), align=TextNode.ALeft, mayChange=True)
@@ -155,36 +188,81 @@ class LiveDJApp:
         if self.sound and not self._muted:
             self.sound.setVolume(self._volume)
 
+    def _groove_state(self, track, source_time):
+        if track.path not in self._grooves:
+            self._grooves[track.path] = GrooveEngine(track.deck.features, track.deck.timeline)
+            self._broad_energy[track.path] = EnergyTrack(track.deck.features,
+                smoothing_seconds=PHRASE_SMOOTHING_SECONDS)
+        groove = self._grooves[track.path]
+        state = groove.state_at(source_time)
+        broad = self._broad_energy[track.path]
+        level = .4*state.energy + .6*broad.at(source_time)
+        trend = broad.at(source_time)-broad.at(max(0, source_time-8))
+        # Continuous measured energy/trend, no threshold-triggered gestures or
+        # hash-selected body character. Quiet music can be almost still.
+        intensity = max(.12, min(.62, .14+.44*level+.10*trend))
+        return replace(state, intensity=intensity, pulse=state.pulse*.45,
+            variation=GrooveVariation(1, 0, .12, .15))
+
+    def pose_at(self, now):
+        span = self.ledger.at(now)
+        source_time = span.source_seconds(frame(now))
+        self.visual.update(self.ledger.spans)
+        intent = self.visual.at(now, span.deck)
+        action = None if self.args.no_actions else intent.action_at(now)
+        state = self._groove_state(span.active, source_time)
+        offsets = set_pose_offsets(self.animator, state, action)
+        # Ownership changes exactly on the audio sample. Blend *body offsets*
+        # from the continuing outgoing groove to the new source for one bar;
+        # do not interpolate source clocks or delay the actual handoff.
+        index = self.ledger.spans.index(span)
+        if index and now < span.start/SAMPLE_RATE+HANDOFF_RECOVERY:
+            previous = self.ledger.spans[index-1]
+            if previous.active.path != span.active.path:
+                old_time = (previous.source_start+previous.end-previous.start)/SAMPLE_RATE + now-span.start/SAMPLE_RATE
+                old = set_pose_offsets(self.animator, self._groove_state(previous.active, old_time), action)
+                w = _smoothstep((now-span.start/SAMPLE_RATE)/HANDOFF_RECOVERY)
+                offsets = {j: tuple(a+(b-a)*w for a,b in zip(old.get(j,(0,0,0)), offsets.get(j,(0,0,0))))
+                           for j in old.keys() | offsets.keys()}
+        if not self.args.no_actions:
+            side, attention, nod = self.visual.attention_at(now)
+            if side:
+                sign = 1 if side == 'l' else -1
+                for joint, turn, tilt in [('head', 8, 5), ('neck_01', 2, 2)]:
+                    h,p,r = offsets.get(joint, (0,0,0))
+                    offsets[joint] = (h*(1-.5*attention)+sign*turn*attention,
+                                     p*(1-.5*attention)+tilt*attention+2*nod, r)
+                # Head/neck lead attention; retain calibrated torso/shoulder
+                # reach geometry so moving the torso cannot pull fingers low.
+        return offsets, intent, action
+
     def draw_at(self, now):
         span = self.ledger.at(now)
         if span is None:
             return
         source_time = span.source_seconds(frame(now))
-        if span.active.path not in self._grooves:
-            self._grooves[span.active.path] = GrooveEngine(span.active.deck.features, span.active.deck.timeline)
-            self._behaviors[span.active.path] = DJBehaviorEngine(
-                span.active.deck.features, span.active.deck.timeline,
-                energy=self._grooves[span.active.path].energy)
-        groove = self._grooves[span.active.path]
-        action = None if self.args.no_actions else transition_action(span, now)
-        if action is None and not self.args.no_actions:
-            action = solo_action(self._behaviors[span.active.path], source_time,
-                span.source_start/SAMPLE_RATE,
-                (span.source_start + span.end-span.start)/SAMPLE_RATE)
-        write_set_pose(self.animator, groove.state_at(source_time), action, transition=span.plan is not None)
+        offsets, intent, action = self.pose_at(now)
+        self.rig.reset()
+        for name, (h,p,r) in offsets.items():
+            self.rig.set_offset(name, heading=h, pitch=p, roll=r)
         if span.active.path != self._last_track:
-            print(f'Deck {span.deck.upper()}: {span.active.path.name}', flush=True)
+            print(f'Deck {deck_label(span.deck)}: {span.active.path.name}', flush=True)
             self._last_track = span.active.path
-        text = f'Deck {span.deck.upper()}  {span.active.path.name}\n'
+        text = f'Deck {deck_label(span.deck)}  {span.active.path.name}\n'
         text += f'{source_time:.1f}s  |  measured tempo {span.active.deck.bpm:.1f} BPM'
         if span.plan:
             progress = max(0, min(1, (frame(now)-span.start)/(span.end-span.start)))
-            text += f'\nMixing to {span.incoming.path.name}  {progress:.0%}\n'
-            text += f'Pitch-preserving rate {span.plan.bpm_a/span.plan.bpm_b:.3f} | initial beat alignment'
+            text += f'\nMixing to deck {deck_label("r" if span.deck == "l" else "l")}: {span.incoming.path.name}  {progress:.0%}'
+        elif intent.kind == 'TRANSITION_PREPARE':
+            text += f'\nPreparing deck {deck_label(intent.deck)}'
         else:
             text += '\nPlaying set automatically'
         if self.engine.errors:
             text += f'\n{len(self.engine.errors)} analysis/transition issue(s); details at exit'
+        if self._muted:
+            text += '\nMuted'
+        else:
+            text += f'\nVolume {self._volume:.0%}'
         self.status.setText(text)
 
     def _update(self, task):
@@ -235,4 +313,7 @@ class LiveDJApp:
             self.base.destroy()
         for error in self.engine.errors:
             print(f'Notice: {error}')
-        print(f'Set ended. Prepared {len(self.engine.handoffs)} handoff(s).')
+        elapsed = self.clock.time()
+        completed = sum(a.active.path != b.active.path and elapsed >= b.start/SAMPLE_RATE
+                        for a,b in zip(self.ledger.spans,self.ledger.spans[1:]))
+        print(f'Set ended. Completed {completed} handoff(s).')

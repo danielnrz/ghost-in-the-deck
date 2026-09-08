@@ -20,7 +20,7 @@ def test_ledger_skipped_frames_and_repeated_handoffs():
     for segment in segments:
         assert ledger.at(segment.span.start/SAMPLE_RATE) is segment.span
         if segment.span.plan:
-            action = transition_action(segment.span, (segment.span.start+segment.span.end)/2/SAMPLE_RATE)
+            action = transition_action(segment.span, segment.span.start/SAMPLE_RATE+.2)
             assert action.is_active
             assert action.side != segment.span.deck
             assert transition_action(segment.span, (segment.span.end+1)/SAMPLE_RATE) is None
@@ -114,10 +114,10 @@ def test_normal_cli_runs_multiple_tracks_to_completion(tmp_path):
         '--headless', '--no-audio'], env=environment, cwd=tmp_path,
         capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stderr
-    assert 'Deck L: 0.wav' in result.stdout
-    assert 'Deck R: 1.wav' in result.stdout
-    assert 'Deck L: 2.wav' in result.stdout
-    assert 'Prepared 2 handoff(s)' in result.stdout
+    assert 'Deck A: 0.wav' in result.stdout
+    assert 'Deck B: 1.wav' in result.stdout
+    assert 'Deck A: 2.wav' in result.stdout
+    assert 'Completed 2 handoff(s)' in result.stdout
 
 
 def test_live_run_cannot_double_start():
@@ -126,15 +126,3 @@ def test_live_run_cannot_double_start():
     app._ran = True
     with pytest.raises(RuntimeError, match='only start once'):
         app.run()
-
-
-def test_solo_gestures_do_not_jump_across_deck_boundaries():
-    from types import SimpleNamespace
-    from ghost_in_the_deck.animation.dj_behavior import GestureEvent
-    from ghost_in_the_deck.dj_app import solo_action
-    behavior = SimpleNamespace(events=[GestureEvent(5, 4, 'hand_to_deck', 'l', .8)],
-                               state_at=lambda t: 'scheduled gesture')
-    assert solo_action(behavior, 6, 0, 10) == 'scheduled gesture'
-    assert solo_action(behavior, 6, 6, 10) is None
-    assert solo_action(behavior, 6, 0, 8) is None
-    assert solo_action(behavior, 10, 0, 20) is None
