@@ -31,6 +31,18 @@ def transition_action(span, absolute_time: float) -> DJActionState | None:
         side='r' if span.deck == 'l' else 'l', strength=1.0)
 
 
+def solo_action(behavior, source_time: float, source_start: float, source_end: float):
+    # Do not jump into or cut off a partly elapsed solo gesture at a handoff.
+    # The audio planner's schedule remains unchanged; only complete visible
+    # gestures inside this deck-owned solo interval are represented here.
+    for event in behavior.events:
+        if event.start <= source_time < event.start + event.duration:
+            if event.start < source_start or event.start + event.duration > source_end:
+                return None
+            return behavior.state_at(source_time)
+    return None
+
+
 def write_set_pose(animator, state, action, *, transition=False):
     animator._write_pose(state, action)
     if transition and action is not None and action.is_active:
@@ -156,7 +168,9 @@ class LiveDJApp:
         groove = self._grooves[span.active.path]
         action = None if self.args.no_actions else transition_action(span, now)
         if action is None and not self.args.no_actions:
-            action = self._behaviors[span.active.path].state_at(source_time)
+            action = solo_action(self._behaviors[span.active.path], source_time,
+                span.source_start/SAMPLE_RATE,
+                (span.source_start + span.end-span.start)/SAMPLE_RATE)
         write_set_pose(self.animator, groove.state_at(source_time), action, transition=span.plan is not None)
         if span.active.path != self._last_track:
             print(f'Deck {span.deck.upper()}: {span.active.path.name}', flush=True)

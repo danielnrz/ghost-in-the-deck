@@ -94,3 +94,47 @@ def test_transition_pose_clearance_on_both_decks():
         harness.rig.actor.cleanup()
         harness.rig.actor.removeNode()
         harness.workstation.removeNode()
+
+
+def test_normal_cli_runs_multiple_tracks_to_completion(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    import soundfile as sf
+    if not os.environ.get('DISPLAY'):
+        pytest.skip('requires graphics display')
+    music = tmp_path/'music'; music.mkdir()
+    for i in range(3):
+        sf.write(music/f'{i}.wav', pcm(.25), SAMPLE_RATE)
+    root = Path(__file__).resolve().parents[1]
+    environment = {**os.environ, 'PYTHONPATH': str(root/'src')}
+    result = subprocess.run([sys.executable, '-m', 'ghost_in_the_deck.app',
+        '--music-dir', str(music), '--cache-dir', str(tmp_path/'cache'),
+        '--headless', '--no-audio'], env=environment, cwd=tmp_path,
+        capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stderr
+    assert 'Deck L: 0.wav' in result.stdout
+    assert 'Deck R: 1.wav' in result.stdout
+    assert 'Deck L: 2.wav' in result.stdout
+    assert 'Prepared 2 handoff(s)' in result.stdout
+
+
+def test_live_run_cannot_double_start():
+    from ghost_in_the_deck.dj_app import LiveDJApp
+    app = LiveDJApp.__new__(LiveDJApp)
+    app._ran = True
+    with pytest.raises(RuntimeError, match='only start once'):
+        app.run()
+
+
+def test_solo_gestures_do_not_jump_across_deck_boundaries():
+    from types import SimpleNamespace
+    from ghost_in_the_deck.animation.dj_behavior import GestureEvent
+    from ghost_in_the_deck.dj_app import solo_action
+    behavior = SimpleNamespace(events=[GestureEvent(5, 4, 'hand_to_deck', 'l', .8)],
+                               state_at=lambda t: 'scheduled gesture')
+    assert solo_action(behavior, 6, 0, 10) == 'scheduled gesture'
+    assert solo_action(behavior, 6, 6, 10) is None
+    assert solo_action(behavior, 6, 0, 8) is None
+    assert solo_action(behavior, 10, 0, 20) is None

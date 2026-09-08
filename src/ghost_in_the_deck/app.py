@@ -487,6 +487,8 @@ def main() -> None:
         value = getattr(args, name)
         if value is not None and (not math.isfinite(value) or value < 0):
             parser.error(f"--{name.replace(chr(95), chr(45))} must be finite and non-negative")
+    if args.seconds is not None and args.seconds == 0:
+        parser.error("--seconds must be greater than zero")
     if any(not math.isfinite(t) or t < 0 for t in args.capture_at):
         parser.error("capture times must be finite and non-negative")
     args.capture_at.sort()

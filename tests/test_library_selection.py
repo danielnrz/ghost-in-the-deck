@@ -87,3 +87,23 @@ def test_short_tracks():
 def test_invalid_dwell(dwell):
     with pytest.raises(ValueError):
         rank_candidates(track('a'), [], 0, dwell_seconds=dwell)
+
+
+def test_cache_source_alias_rejected(tmp_path):
+    import hashlib
+    path = tmp_path/'source.wav'; path.write_bytes(b'original')
+    cache = tmp_path/'cache'; cache.mkdir()
+    key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+    (cache/f'{key}.json').hardlink_to(path)
+    with pytest.raises(ValueError, match='aliases source'):
+        cached_analysis(path, cache)
+    assert path.read_bytes() == b'original'
+
+
+def test_subprocess_analysis_failure_is_skipped(tmp_path):
+    import subprocess
+    for name in ('a.mp3', 'b.wav'): (tmp_path/name).write_bytes(b'x')
+    with patch('ghost_in_the_deck.library.analyse', side_effect=[
+            subprocess.CalledProcessError(1, 'ffmpeg'), track('b').deck.features]):
+        result = load_library(tmp_path, tmp_path/'cache')
+    assert len(result.tracks) == len(result.errors) == 1

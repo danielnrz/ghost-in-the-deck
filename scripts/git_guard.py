@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,10 @@ PRIVATE_MEDIA_SUFFIXES = {
     ".mov",
     ".ogg",
     ".wav",
+    ".opus",
+    ".oga",
+    ".aif",
+    ".wma",
     ".webm",
 }
 
@@ -36,6 +41,13 @@ def guard_paths(paths: list[str]) -> list[str]:
     failures: list[str] = []
     for path in paths:
         parts = Path(path).parts
+        name = Path(path).name
+        if name in {"ASTRA_COMPLETION_STATE.md", "PROJECT_COMPLETE.md", "AGENTS.md"}:
+            failures.append(f"development-only file is tracked: {path}")
+        if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+            failures.append(f"environment credentials file is tracked: {path}")
+        if Path(path).suffix.lower() in {".pem", ".key", ".p12"}:
+            failures.append(f"credential material is tracked: {path}")
         if any(part in FORBIDDEN_DIRS for part in parts):
             failures.append(f"generated path is tracked: {path}")
         if parts and parts[0] == "testMusic" and path != "testMusic/.gitkeep":
@@ -45,11 +57,27 @@ def guard_paths(paths: list[str]) -> list[str]:
     return failures
 
 
+def guard_contents(paths: list[str]) -> list[str]:
+    # Report paths only, never echo a potential secret into logs.
+    signatures = [r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+                  r"\bAKIA[A-Z0-9]{16}\b", r"\bgh[pousr]_[A-Za-z0-9]{30,}\b",
+                  r"\bsk-[A-Za-z0-9_-]{32,}\b"]
+    failures = []
+    for path in paths:
+        try:
+            content = (ROOT / path).read_text()
+        except (UnicodeError, OSError):
+            continue
+        if any(re.search(pattern, content) for pattern in signatures):
+            failures.append(f"possible secret in tracked file: {path}")
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--require-work-branch", action="store_true")
     args = parser.parse_args()
-    failures = guard_paths(tracked_paths())
+    failures = guard_paths(tracked_paths()) + guard_contents(tracked_paths())
     try:
         subprocess.run(
             ("git", "diff", "--check", "HEAD", "--"),
