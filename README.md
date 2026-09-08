@@ -52,9 +52,19 @@ This synthesizes three short instrumental tracks locally in a temporary folder,
 plays an automatic set, and cleans up the temporary files on exit.
 
 The window shows the avatar and workstation, the active deck, source position,
-measured tempo, and the next track while mixing. During a transition the avatar
-reaches toward the incoming deck. Solo gestures and their filter sweeps/gain
-risers come from the existing musical-context planner.
+measured tempo, and the next track while mixing. The avatar briefly reaches toward the incoming deck as a real transition
+starts, monitors the blend, then acknowledges the handoff and settles. Deck A
+is the avatar's left; deck B is its right. Labels on the workstation match the
+status display.
+
+Control gestures consume effects actually rendered into the committed audio
+and the real transition ledger. They never schedule audio. Most playback is
+restrained groove: measured short/broad energy and trend change body intensity,
+while hands stay relaxed. Effects can be represented on the owning deck, with
+12-second minimum spacing, 24 seconds before the same effect repeats, and six
+seconds of settling after handoff. Disabling effects also removes their control
+gestures. Brief contact follows a smooth approach and recovery; the body blends
+across source handoffs without moving the audio boundary.
 
 | Control or option | Meaning |
 | --- | --- |
@@ -142,7 +152,8 @@ DISPLAY=:1 .venv/bin/python scripts/render_set.py
 ```
 
 This synthesizes a library, consumes the production set engine, and renders both
-transition directions into ignored `out/set_review`. Use your actual display
+transition directions, low/high solo passages, effects, and handoff/recovery
+sequences into ignored `out/set_review`, with frame and behavior JSON manifests. Use your actual display
 instead of `:1`. The live runtime can also save frames with
 `--capture-at 10 40 --capture-dir out/set_review`.
 
