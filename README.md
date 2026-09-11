@@ -60,7 +60,11 @@ status display.
 Control gestures consume effects actually rendered into the committed audio
 and the real transition ledger. They never schedule audio. Most playback is
 restrained groove: measured short/broad energy and trend change body intensity,
-while hands stay relaxed. Effects can be represented on the owning deck, with
+with relaxed articulated hands. Real effects get a small knob turn; transition
+starts get a button tap or a platter-side cue check that releases as playback starts.
+A sustained measured energy rise can earn a rare cheer and small bounce, with
+at least one song skipped afterward and a 90-second minimum gap. Effects can be
+represented on the owning deck, with
 12-second minimum spacing, 24 seconds before the same effect repeats, and six
 seconds of settling after handoff. Disabling effects also removes their control
 gestures. Brief contact follows a smooth approach and recovery; the body blends
@@ -156,6 +160,9 @@ transition directions, low/high solo passages, effects, and handoff/recovery
 sequences into ignored `out/set_review`, with frame and behavior JSON manifests. Use your actual display
 instead of `:1`. The live runtime can also save frames with
 `--capture-at 10 40 --capture-dir out/set_review`.
+
+See [live performance policies and review commands](docs/visual-behavior.md)
+for the hand variants and rare musical accents.
 
 The earlier single-track diagnostics remain available via `--single-track`;
 `--show-action hand_to_deck` selects an isolated gesture review. Beat reports,

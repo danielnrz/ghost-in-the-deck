@@ -20,3 +20,6 @@ out/
 
 # OS
 .DS_Store
+
+# Local development session transcripts
+codex-session-*.md
