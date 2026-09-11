@@ -381,7 +381,7 @@ class SweepResult:
 class ClearanceHarness:
     """Builds the rig + built workstation once and measures composed reach poses."""
 
-    def __init__(self):
+    def __init__(self, rig_class=None):
         import panda_env
 
         if not panda_env.has_window():
@@ -391,7 +391,7 @@ class ClearanceHarness:
         from ghost_in_the_deck.scene.workstation import build_workstation
 
         self.base = panda_env.get_base()
-        self.rig = AvatarRig(ASSET, parent=self.base.render)
+        self.rig = (rig_class or AvatarRig)(ASSET, parent=self.base.render)
         self.workstation = build_workstation(self.base.render)
         self.furniture, self.operated = _solids(self.workstation)
         self.probes = {

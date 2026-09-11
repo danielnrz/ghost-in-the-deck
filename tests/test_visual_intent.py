@@ -151,7 +151,8 @@ def test_production_contact_clearance_and_frame_continuity():
         pytest.skip('requires rendered rig')
     spans=[s.span for s in fake_set(True,3)]
     app=app_for(spans); app.visual.update(spans)
-    harness=ClearanceHarness(); app.animator=AvatarAnimator(harness.rig)
+    from ghost_in_the_deck.animation.rig import PerformanceRig
+    harness=ClearanceHarness(rig_class=PerformanceRig); app.animator=AvatarAnimator(harness.rig)
     worst_margin=math.inf
     try:
         for intent in app.visual.interactions:
@@ -169,17 +170,18 @@ def test_production_contact_clearance_and_frame_continuity():
                                 for a,b in zip(last.get(j,(0,0,0)),offsets.get(j,(0,0,0))))
                     assert maximum < 8, (now,maximum)  # catch frame-scale joint snaps
                 last=offsets
-            offsets,_,_=app.pose_at(intent.operation_start+.1)
+            offsets,_,_=app.pose_at((intent.contact_start if intent.contact_start is not None else intent.operation_start)+.1)
             harness.rig.reset()
             for name,(h,p,r) in offsets.items(): harness.rig.set_offset(name,h,p,r)
             harness.rig.force_update()
-            finger=harness.rig.expose(f'middle_03_{intent.deck}').getPos(harness.base.render)
-            target_x=(.204 if intent.deck=='l' else -.204)-.0288
-            # Each physical panel's knob is offset the same way in world X,
-            # not mirrored. Contact geometry must use that actual scene detail.
-            assert abs(finger.x-target_x) < .003
-            assert abs(finger.z-1.033) < .003
-            assert abs(finger.y+.378) < .003
+            finger=harness.rig.expose(f'index_03_{intent.deck}').getPos(harness.base.render)
+            sign=1 if intent.deck=='l' else -1
+            targets={'knob':(.204*sign-.0288,-.378,1.035),
+                     'button':(.204*sign+.045,-.322,1.030),
+                     'platter':(.34*sign,-.40,1.032)}
+            # Articulated, moving fingertips operate the intended real target;
+            # allow their deliberate turn/tap travel instead of a frozen joint.
+            assert np.linalg.norm(np.array(finger)-targets[intent.variant]) < .015
     finally:
         harness.rig.actor.cleanup(); harness.rig.actor.removeNode(); harness.workstation.removeNode()
 

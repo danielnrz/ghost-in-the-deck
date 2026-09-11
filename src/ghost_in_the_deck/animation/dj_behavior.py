@@ -159,6 +159,8 @@ class DJActionState:
     weight: float
     side: str | None
     strength: float
+    variant: str = "knob"
+    contact_phase: float = 0.0
 
     @property
     def is_active(self) -> bool:

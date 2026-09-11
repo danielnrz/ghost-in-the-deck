@@ -12,7 +12,8 @@ from .animation.visual_intent import VisualTimeline, deck_label, HANDOFF_RECOVER
 from .animation.energy import EnergyTrack
 from .animation.structure import PHRASE_SMOOTHING_SECONDS
 from .animation.groove import GrooveEngine, GrooveVariation
-from .animation.rig import AvatarRig
+from .animation.rig import PerformanceRig
+from .animation.performance_pose import set_pose_offsets, hype_lift
 from .clock import PlaybackClock
 from .library import load_library
 from .live import SetBuffer, StreamLedger
@@ -25,49 +26,6 @@ def transition_action(span, absolute_time: float) -> DJActionState | None:
     visual = VisualTimeline()
     visual.update([span])
     return visual.at(absolute_time, span.deck).action_at(absolute_time)
-
-
-def set_pose_offsets(animator, state, action):
-    offsets = animator.pose_offsets(state)
-    if action is None or not action.is_active:
-        return offsets
-    if action.action != 'hand_to_deck':
-        return animator.pose_offsets(state, action)
-    side = action.side
-    sign = 1 if side == 'l' else -1
-    # The settled middle fingertip is over the real knob, 13 mm above its
-    # top. Panel knobs share a world-X offset, so these solves are asymmetric.
-    contact = {
-        'l': ((-9.584,.003,-28.823),(14.947,46.631,15),(0,33.841,-19.987)),
-        'r': ((9.539,-2.839,32.513),(-13.332,45.463,-13.148),(0,33.777,20)),
-    }[side]
-    # Elbow first: fold the forearm behind the near edge, then carry the bent
-    # arm above the controls, then settle. No broad lateral shoulder detour.
-    # Each leg has zero endpoint velocity; reverse the same safe path to leave.
-    u = 2*min(action.progress,1-action.progress)
-    neutral = ((0,0,0),(0,0,0),(0,0,0))
-    tuck = ((0,0,0),(0,-55,0),(0,0,0))
-    above = ((contact[0][0],contact[0][1],-46*sign),(0,-55,0),(0,60,-20*sign))
-    extended = (above[0],contact[1],above[2])
-    if u < .25:
-        a,b,w = neutral,tuck,_smoothstep(u/.25)
-    elif u < .45:
-        a,b,w = tuck,above,_smoothstep((u-.25)/.20)
-    elif u < .78:
-        a,b,w = above,extended,_smoothstep((u-.45)/.33)
-    else:
-        a,b,w = extended,contact,_smoothstep((u-.78)/.22)
-    presence = _smoothstep(u/.25)
-    for joint, first, last in zip(('upperarm','lowerarm','hand'),a,b):
-        name=f'{joint}_{side}'
-        motion=tuple(x+(y-x)*w for x,y in zip(first,last))
-        groove=offsets.get(name,(0,0,0))
-        offsets[name]=tuple(x+y*(1-presence) for x,y in zip(motion,groove))
-    for joint in ('pelvis','spine_01','spine_02','spine_03'):
-        offsets[joint]=tuple(v*(1-presence) for v in offsets.get(joint,(0,0,0)))
-    name=f'clavicle_{side}'
-    offsets[name]=tuple(a*(1-presence)+b*presence for a,b in zip(offsets.get(name,(0,0,0)),(0,-3,0)))
-    return offsets
 
 
 def write_set_pose(animator, state, action, *, transition=False):
@@ -114,7 +72,7 @@ class LiveDJApp:
             self._append(chunk)
             self.base = ShowBase()
             GhostApp._setup_scene(self)
-            self.rig = AvatarRig(AVATAR, parent=self.base.render)
+            self.rig = PerformanceRig(AVATAR, parent=self.base.render)
             self.workstation = build_workstation(self.base.render)
             GhostApp._frame_scene(self)
             # A raised view makes both control rows and hand clearance visible.
@@ -243,6 +201,7 @@ class LiveDJApp:
         source_time = span.source_seconds(frame(now))
         offsets, intent, action = self.pose_at(now)
         self.rig.reset()
+        self.rig.actor.setZ(hype_lift(action))
         for name, (h,p,r) in offsets.items():
             self.rig.set_offset(name, heading=h, pitch=p, roll=r)
         if span.active.path != self._last_track:

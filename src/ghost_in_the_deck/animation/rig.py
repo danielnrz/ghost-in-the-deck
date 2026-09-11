@@ -192,3 +192,23 @@ class AvatarRig:
     def force_update(self) -> None:
         """Recompute the skeleton now, without waiting for a rendered frame."""
         self.actor.getPartBundle("modelRoot").forceUpdate()
+
+
+class PerformanceRig(AvatarRig):
+    """Live hand articulation; legacy diagnostic rig/calibration stays unchanged.
+
+    Forearm rotation supplies palm orientation instead of forcing the wrist to
+    its rail. Finger flexion is modest and always reset with the rest of the rig.
+    """
+    CONTROLLED = AvatarRig.CONTROLLED + tuple(
+        f'{finger}_0{segment}_{side}'
+        for side in ('l','r') for finger in ('thumb','index','middle','ring','pinky')
+        for segment in (1,2,3))
+    LIMITS = {
+        **AvatarRig.LIMITS,
+        **{f'upperarm_{s}': (35,45,95) for s in ('l','r')},
+        **{f'lowerarm_{s}': (45,100,45) for s in ('l','r')},
+        **{f'hand_{s}': (25,45,35) for s in ('l','r')},
+        **{f'{f}_0{i}_{s}': (20,45,30) for s in ('l','r')
+           for f in ('thumb','index','middle','ring','pinky') for i in (1,2,3)},
+    }

@@ -15,9 +15,9 @@ from ..set_engine import SAMPLE_RATE
 # BPM a bar is ~2 s: approach/recovery each take most of a bar, and a major
 # interaction at most once per six bars leaves real listening time. Repeating
 # the same effect needs twice that space. Transitions reserve the entire blend.
-APPROACH = 1.6
-RECOVERY = 1.8
-ATTENTION_LEAD = 2.4
+APPROACH = 2.0
+RECOVERY = 2.2
+ATTENTION_LEAD = 2.8
 TRANSITION_HOLD = .6
 HANDOFF_RECOVERY = 2.4
 MIN_MAJOR_INTERVAL = 12.0
@@ -48,28 +48,37 @@ class VisualIntent:
     intensity: float = 1.0
     return_to_neutral: bool = True
     contact_end: float | None = None
+    variant: str = "knob"
+    contact_start: float | None = None
 
     @property
     def major(self):
         return self.intensity > 0 and self.kind in ('FILTER_ADJUST', 'GAIN_ADJUST', 'TRANSITION_PREPARE')
 
     def action_at(self, now: float) -> DJActionState | None:
+        if self.kind == 'HYPE' and self.begin <= now < self.end:
+            progress=(now-self.begin)/(self.end-self.begin)
+            return DJActionState(now,'small_hype',progress,
+                _envelope_weight('small_hype',progress),self.deck,.55,'cheer')
         if not self.major or not self.begin <= now < self.end:
             return None
         # Traverse approach, stationary contact, and recovery once. The live
         # pose adapter maps this progress onto its calibrated elbow-first path.
         contact_end = self.operation_end if self.contact_end is None else self.contact_end
-        if now < self.operation_start:
-            progress = .5 * _smoothstep((now-self.begin)/(self.operation_start-self.begin))
+        contact_start = self.operation_start if self.contact_start is None else self.contact_start
+        if now < contact_start:
+            progress = .5 * ((now-self.begin)/(contact_start-self.begin))
         elif now <= contact_end:
             progress = .5
         else:
-            progress = .5 + .5 * _smoothstep((now-contact_end)/(self.end-contact_end))
+            progress = .5 + .5 * ((now-contact_end)/(self.end-contact_end))
         return DJActionState(now, 'hand_to_deck', progress,
-            _envelope_weight('hand_to_deck', progress), self.deck, self.intensity)
+            _envelope_weight('hand_to_deck', progress), self.deck, self.intensity, self.variant,
+            min(1,max(0,(now-contact_start)/max(.001,contact_end-contact_start))))
 
     def phase_at(self, now: float) -> str:
-        if now < self.operation_start:
+        contact_start = self.operation_start if self.contact_start is None else self.contact_start
+        if now < contact_start:
             return 'anticipation'
         contact_end = self.operation_end if self.contact_end is None else self.contact_end
         if now <= contact_end:
@@ -83,6 +92,7 @@ class VisualTimeline:
         self._signature = None
         self.interactions: tuple[VisualIntent, ...] = ()
         self.transitions = ()
+        self.hypes = ()
 
     def update(self, spans):
         signature = tuple(id(s) for s in spans)
@@ -96,10 +106,14 @@ class VisualTimeline:
         candidates = []
         for span in transitions:
             start, end = span.start/SAMPLE_RATE, span.end/SAMPLE_RATE
-            contact_end = min(start+TRANSITION_HOLD, end)
+            variant="platter" if abs(span.plan.bpm_a-span.plan.bpm_b) > .5 else "button"
+            # A platter cue check releases as playback starts: no fake scratch.
+            contact_start = start-.45 if variant=='platter' else start
+            contact_end = start if variant=='platter' else min(start+TRANSITION_HOLD,end)
             candidates.append(VisualIntent('TRANSITION_PREPARE', other_deck(span.deck),
-                'crossfade', start, end, max(0, start-APPROACH),
-                contact_end+RECOVERY, contact_end=contact_end))
+                'crossfade', start, end, max(0,contact_start-APPROACH),
+                contact_end+RECOVERY,contact_end=contact_end,variant=variant,
+                contact_start=max(0,contact_start)))
         # Transitions take priority, including future committed transitions. If
         # a deliberately tiny dwell makes reaches incompatible, monitor the
         # next blend rather than interrupt a hand that is still returning.
@@ -133,9 +147,42 @@ class VisualTimeline:
                     continue
                 accepted.append(intent)
         self.interactions = tuple(sorted(accepted, key=lambda a: a.begin))
+        self.hypes = self._plan_hypes(spans)
+        # A rare measured accent can replace an optional solo representation;
+        # audible effects are unchanged. Real transition work always wins.
+        self.interactions = tuple(a for a in self.interactions if a.operation=='crossfade' or
+            all(a.end+8 <= h.begin or a.begin >= h.end+8 for h in self.hypes))
+
+    def _plan_hypes(self, spans):
+        # Performance accents do not operate controls or claim a DSP action.
+        # Require a sustained measured lift, not simply a loud recording.
+        hypes=[];last_track=-2;last_time=-90
+        solos=[s for s in spans if s.plan is None]
+        for track_number,span in enumerate(solos):
+            if track_number-last_track < 2:
+                continue  # at least one entire song without hype in between
+            broad=span.active.deck.broad_energy
+            energy=span.active.deck.energy;timeline=span.active.deck.timeline
+            offset=(span.start-span.source_start)/SAMPLE_RATE
+            source_end=(span.source_start+span.end-span.start)/SAMPLE_RATE
+            for bar in range(int(source_end/max(.1,4*timeline.nominal_interval))+1):
+                source=timeline.beat_time(bar*4);now=source+offset
+                if now < span.start/SAMPLE_RATE+16 or now+3.2 > span.end/SAMPLE_RATE-12:
+                    continue
+                if now-last_time < 90:
+                    continue
+                if broad.at(source) < .78 or energy.at(source) < .8 or broad.at(source)-broad.at(source-12) < .30:
+                    continue
+                if any(now < a.end+8 and now+3.2 > a.begin-8 for a in self.interactions if a.operation=='crossfade'):
+                    continue
+                hypes.append(VisualIntent('HYPE',span.deck,'measured_energy_lift',now,now+3.2,
+                                         now,now+3.2,intensity=.55,variant='cheer'))
+                last_track=track_number;last_time=now
+                break
+        return tuple(hypes)
 
     def at(self, now: float, active_deck: str) -> VisualIntent:
-        for intent in self.interactions:
+        for intent in self.interactions + self.hypes:
             if intent.begin <= now < intent.end:
                 return intent
         for span in self.transitions:
