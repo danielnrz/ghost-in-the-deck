@@ -167,6 +167,11 @@ def _build_control_cluster(root: NodePath, target, label: str) -> None:
     knob.reparentTo(cluster)
     knob.setPos(x - CONTROL_PANEL_WIDTH * 0.18, y - CONTROL_PANEL_DEPTH * 0.15, top_z)
 
+    button = box(.028,.025,.012,(.25,.6,.5,1))
+    button.setName(f"play-button-{label}")
+    button.reparentTo(cluster)
+    button.setPos(x+.045,y+.038,top_z)
+
     fader = box(*FADER_SIZE, FADER_COLOR)
     fader.setName(f"control-fader-{label}")
     fader.reparentTo(cluster)

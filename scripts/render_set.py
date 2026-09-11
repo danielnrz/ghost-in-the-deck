@@ -18,12 +18,13 @@ from ghost_in_the_deck.demo import create_demo
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out-dir', type=Path, default=ROOT/'out'/'set_review')
+    parser.add_argument('--performance',action='store_true',help='measured builds and differing tempos')
     options = parser.parse_args()
     options.out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='ghost-render-') as temp:
         args = argparse.Namespace(headless=True, no_audio=True, no_actions=False,
             no_fx=False, show_action=None, single_track=False, refresh=False,
-            music_dir=str(create_demo(Path(temp)/'music')), cache_dir=str(Path(temp)/'cache'),
+            music_dir=str(create_demo(Path(temp)/'music',seconds=70 if options.performance else 50,performance=options.performance)), cache_dir=str(Path(temp)/'cache'),
             transition_bars=2, dwell=5, track=None, capture_at=[], stall_every=0,
             simulate_stall=0, seconds=None)
         app = build_app(args)
@@ -51,7 +52,7 @@ def main():
                 scenarios[f'transition-{i+1}-middle'] = [(start+end)/2+j/6 for j in range(4)]
                 scenarios[f'transition-{i+1}-handoff'] = [end-.6+j/6 for j in range(22)]
                 scenarios[f'transition-{i+1}-boundary'] = [end-1/60,end,end+1/60]
-            for i, intent in enumerate(app.visual.interactions):
+            for i, intent in enumerate(app.visual.interactions + app.visual.hypes):
                 if intent.operation != 'crossfade':
                     scenarios[f'effect-{i+1}'] = [intent.begin+j/6 for j in range(int((intent.end-intent.begin)*6)+1)]
             manifest = []
@@ -66,7 +67,7 @@ def main():
                     _, intent, action = app.pose_at(now)
                     manifest.append(dict(file=path.name,time=now,scenario=name,
                         intent=intent.kind,operation=intent.operation,deck=intent.deck,
-                        phase=intent.phase_at(now) if action else 'monitor/groove'))
+                        phase=intent.phase_at(now) if action else 'monitor/groove',variant=intent.variant))
             (options.out_dir/'frames.json').write_text(json.dumps(manifest,indent=2))
             # Compact replayable behavior record spanning the entire actual set.
             timeline=[]
@@ -76,7 +77,7 @@ def main():
                 timeline.append(dict(time=now,audio='mix' if span.plan else 'solo',
                     active_deck=span.deck,operation=intent.operation,intent=intent.kind,
                     hand=action.side if action else None,
-                    phase=intent.phase_at(now) if action else 'monitor/groove'))
+                    phase=intent.phase_at(now) if action else 'monitor/groove',variant=intent.variant))
             (options.out_dir/'timeline.json').write_text(json.dumps(timeline,indent=2))
             print(f'Rendered {len(manifest)} frames; {len(timeline)} timeline samples')
         finally:

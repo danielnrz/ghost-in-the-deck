@@ -76,7 +76,8 @@ def test_transition_pose_clearance_on_both_decks():
     from test_library_selection import track
     if not panda_env.has_window():
         pytest.skip('requires rendered rig')
-    harness = ClearanceHarness()
+    from ghost_in_the_deck.animation.rig import PerformanceRig
+    harness = ClearanceHarness(rig_class=PerformanceRig)
     try:
         a, b = track('a'), track('b')
         plan = rank_candidates(a, [b], 0)[0].plan
