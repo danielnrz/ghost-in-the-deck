@@ -44,7 +44,8 @@ def timeline_record(spans):
             assert intent.major and intent.operation in ('crossfade','filter_sweep','gain_riser')
             assert action.side == intent.deck
             if intent.operation == 'crossfade':
-                assert any(s.plan and other_deck(s.deck)==intent.deck and
+                expected = (lambda s: s.deck) if intent.kind == 'TRANSITION_MIX' else (lambda s: other_deck(s.deck))
+                assert any(s.plan and expected(s)==intent.deck and
                            s.start/SAMPLE_RATE == intent.operation_start for s in spans)
             else:
                 assert span.plan is None and span.deck == intent.deck
@@ -64,12 +65,15 @@ def test_long_set_causality_restraint_and_repeatability(tmp_path):
     assert records == again
     # Five tracks, four real handoffs: A -> B -> A -> B -> A.
     assert [s.deck for s in spans if s.plan is None] == ['l','r','l','r','l']
-    assert len([a for a in visual.interactions if a.operation=='crossfade']) == 4
+    assert len([a for a in visual.interactions if a.kind=='TRANSITION_PREPARE']) == 4
+    assert len([a for a in visual.interactions if a.kind=='TRANSITION_MIX']) == 4
     assert sum(r[4]=='IDLE_GROOVE' for r in records) > len(records)*.7
     assert any(a.operation=='filter_sweep' for a in visual.interactions)
     for a,b in zip(visual.interactions,visual.interactions[1:]):
         assert a.end <= b.begin
-        assert b.begin-a.begin >= MIN_MAJOR_INTERVAL
+        coordinated = (a.operation == b.operation == 'crossfade' and
+                       a.operation_start == b.operation_start)
+        assert coordinated or b.begin-a.begin >= MIN_MAJOR_INTERVAL
         if a.kind == b.kind and a.operation != 'crossfade':
             assert b.begin-a.begin >= REPEAT_INTERVAL
     for intent in visual.interactions:
@@ -140,7 +144,8 @@ def test_dense_transition_policy_monitors_instead_of_conflicting():
     a=spans[0]
     b=replace(a,start=a.start+5*SAMPLE_RATE,end=a.end+5*SAMPLE_RATE,deck='r')
     visual=VisualTimeline(); visual.update([a,b])
-    assert len(visual.interactions)==1
+    assert len([i for i in visual.interactions if i.kind=='TRANSITION_PREPARE'])==1
+    assert len({i.operation_start for i in visual.interactions})==1
 
 
 def test_production_contact_clearance_and_frame_continuity():
@@ -175,13 +180,10 @@ def test_production_contact_clearance_and_frame_continuity():
             for name,(h,p,r) in offsets.items(): harness.rig.set_offset(name,h,p,r)
             harness.rig.force_update()
             finger=harness.rig.expose(f'index_03_{intent.deck}').getPos(harness.base.render)
-            sign=1 if intent.deck=='l' else -1
-            targets={'knob':(.204*sign-.0288,-.378,1.035),
-                     'button':(.204*sign+.045,-.322,1.030),
-                     'platter':(.34*sign,-.40,1.032)}
+            from ghost_in_the_deck.animation.workstation import performance_target
             # Articulated, moving fingertips operate the intended real target;
             # allow their deliberate turn/tap travel instead of a frozen joint.
-            assert np.linalg.norm(np.array(finger)-targets[intent.variant]) < .015
+            assert np.linalg.norm(np.array(finger)-performance_target(intent.variant,intent.deck)) < .015
     finally:
         harness.rig.actor.cleanup(); harness.rig.actor.removeNode(); harness.workstation.removeNode()
 
@@ -192,7 +194,7 @@ def test_short_dwell_respects_handoff_cooldown_and_blends_attention():
     # its anticipation is inside the prior handoff cooldown and must be skipped.
     b=replace(a,start=a.start+12*SAMPLE_RATE,end=a.end+12*SAMPLE_RATE,deck='r')
     visual=VisualTimeline(); visual.update([a,b])
-    assert len(visual.interactions)==1
+    assert len([i for i in visual.interactions if i.kind=='TRANSITION_PREPARE'])==1
     b=replace(a,start=a.end+SAMPLE_RATE,end=a.end+9*SAMPLE_RATE,deck='r')
     visual.update([a,b])
     last=None

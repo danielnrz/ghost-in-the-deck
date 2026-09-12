@@ -1,4 +1,4 @@
-"""Generate the Phase 0 test avatar with MPFB and export it as GLB.
+"""Generate the rig-compatible Ghost in the Deck performer with MPFB.
 
 Run headless:
 
@@ -15,6 +15,7 @@ has no use for.
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -59,6 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True, help="destination .glb path")
     parser.add_argument("--blend", help="optionally also save the .blend source")
     parser.add_argument("--rig", default="game_engine", help="MPFB standard rig name")
+    parser.add_argument(
+        "--no-outfit",
+        action="store_true",
+        help="export the body/rig only (asset-pipeline diagnostics)",
+    )
     parser.add_argument(
         "--no-neutral-pose",
         action="store_true",
@@ -113,23 +119,176 @@ def configure_rig(scene, rig_name: str) -> None:
     scene.MPFB_ADR_auto_generate = False
 
 
-def ensure_material(body) -> None:
-    """Give the body a plain shader if MPFB left it unmaterialised.
-
-    The enhanced skins depend on asset packs that are not part of the add-on, so
-    a headless run can end up with no material at all, which glTF exports as an
-    untextured primitive.
-    """
-    if body.data.materials and body.data.materials[0] is not None:
-        return
-
-    material = bpy.data.materials.new("GhostSkin")
+def material(name, color, *, roughness=0.65, metallic=0.0):
+    """Make one deliberately simple, glTF-safe performer material."""
+    old = bpy.data.materials.get(name)
+    material = old or bpy.data.materials.new(name)
     material.use_nodes = True
     principled = material.node_tree.nodes.get("Principled BSDF")
     if principled:
-        principled.inputs["Base Color"].default_value = (0.62, 0.48, 0.42, 1.0)
-        principled.inputs["Roughness"].default_value = 0.65
-        principled.inputs["Metallic"].default_value = 0.0
+        principled.inputs["Base Color"].default_value = color
+        principled.inputs["Roughness"].default_value = roughness
+        principled.inputs["Metallic"].default_value = metallic
+    return material
+
+
+def ensure_material(body) -> None:
+    """Use a controlled skin tone instead of MPFB's pink preview material."""
+    skin = material("GhostSkin", (0.42, 0.22, 0.14, 1.0), roughness=0.72)
+    body.data.materials.clear()
+    body.data.materials.append(skin)
+
+
+def _dominant_groups(obj, vertex) -> set[str]:
+    indexes = {group.index: group.name for group in obj.vertex_groups}
+    return {indexes[item.group] for item in vertex.groups
+            if item.weight >= 0.16 and item.group in indexes}
+
+
+def surface_garment(body, name, keep, garment_material, *, thickness=.006, ease=.018):
+    """Cut a fitted skinned garment from the baked body surface.
+
+    This intentionally reuses the body's topology, armature modifier and
+    weights.  Clothes therefore follow the exact runtime skeleton without a
+    second retargeting system.  A small radial ease and outward solidify layer
+    make the result read as fabric instead of recoloured skin.
+    """
+    garment = body.copy()
+    garment.data = body.data.copy()
+    garment.name = name
+    garment.data.name = f"{name}Mesh"
+    bpy.context.collection.objects.link(garment)
+    garment.data.materials.clear()
+    garment.data.materials.append(garment_material)
+
+    for vertex in garment.data.vertices:
+        groups = _dominant_groups(garment, vertex)
+        vertex.select = not keep(vertex.co, groups)
+        if not vertex.select:
+            vertex.co.x *= 1.0 + ease
+            # Expand around the body's centreline in depth, not world zero.
+            vertex.co.y = -0.035 + (vertex.co.y + 0.035) * (1.0 + ease)
+
+    select_only(garment)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.delete(type="VERT")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    for polygon in garment.data.polygons:
+        polygon.use_smooth = True
+    solidify = garment.modifiers.new("Fabric thickness", "SOLIDIFY")
+    solidify.thickness = thickness
+    solidify.offset = 1.0
+    # Skin first, then add thickness around the final animated surface.
+    bpy.ops.object.modifier_move_to_index(modifier=solidify.name,
+                                          index=len(garment.modifiers)-1)
+    return garment
+
+
+def _bind_to_bone(obj, armature, bone_name):
+    """Skin a rigid accessory to one deform bone for portable glTF export."""
+    obj.parent = armature
+    group = obj.vertex_groups.new(name=bone_name)
+    group.add(range(len(obj.data.vertices)), 1.0, "REPLACE")
+    modifier = obj.modifiers.new("GhostRig", "ARMATURE")
+    modifier.object = armature
+    for polygon in obj.data.polygons:
+        polygon.use_smooth = True
+    return obj
+
+
+def _primitive(name, create, armature, bone, mat):
+    create()
+    obj = bpy.context.object
+    obj.name = name
+    obj.data.name = f"{name}Mesh"
+    select_only(obj)
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    obj.data.materials.append(mat)
+    return _bind_to_bone(obj, armature, bone)
+
+
+def create_outfit(body, armature):
+    """Build a compact, redistributable DJ identity on the existing rig."""
+    ink = material("MidnightFabric", (0.018, 0.024, 0.038, 1), roughness=.82)
+    graphite = material("GraphiteFabric", (0.055, 0.065, 0.085, 1), roughness=.78)
+    teal = material("GhostTeal", (0.025, 0.72, 0.73, 1), roughness=.38, metallic=.12)
+    shoe_canvas = material("WarmSneakerCanvas", (0.38, 0.32, 0.28, 1), roughness=.76)
+    metal = material("HeadphoneMetal", (0.08, 0.10, 0.14, 1), roughness=.30, metallic=.72)
+
+    torso = {"pelvis", "spine_01", "spine_02", "spine_03",
+             "clavicle_l", "clavicle_r", "upperarm_l", "upperarm_r"}
+    legs = {"pelvis", "thigh_l", "thigh_r", "calf_l", "calf_r"}
+    shirt = surface_garment(
+        body, "OversizedDJTop",
+        lambda co, groups: .88 <= co.z <= 1.46 and bool(groups & torso)
+            and not (("upperarm_l" in groups or "upperarm_r" in groups) and co.z < 1.12),
+        graphite, thickness=.008, ease=.035,
+    )
+    pants = surface_garment(
+        body, "TaperedDJTrousers",
+        lambda co, groups: .105 <= co.z <= .98 and bool(groups & legs),
+        ink, thickness=.007, ease=.022,
+    )
+    for side, x in (("L", .221), ("R", -.221)):
+        bone = f"foot_{side.lower()}"
+        upper = _primitive(f"SneakerUpper{side}", lambda x=x:
+            bpy.ops.mesh.primitive_cube_add(location=(x, -.070, .078),
+                                             scale=(.064, .125, .060)),
+            armature, bone, shoe_canvas)
+        # Slope and narrow the toe so the high-top reads as footwear rather
+        # than a cube around an anatomical foot.
+        for vertex in upper.data.vertices:
+            if vertex.co.y < -.070:
+                vertex.co.x = x + (vertex.co.x - x) * .82
+                if vertex.co.z > .078:
+                    vertex.co.z = .092
+        bevel = upper.modifiers.new("Rounded sneaker upper", "BEVEL")
+        bevel.width = .022
+        bevel.segments = 3
+        outsole = _primitive(f"SneakerSole{side}", lambda x=x:
+            bpy.ops.mesh.primitive_cube_add(location=(x, -.075, .018),
+                                             scale=(.068, .132, .018)),
+            armature, bone, teal)
+        bevel = outsole.modifiers.new("Rounded outsole", "BEVEL")
+        bevel.width = .010
+        bevel.segments = 2
+
+    # A cyan chest mark gives the dark silhouette a readable focal point.
+    _primitive("ChestSignal", lambda: bpy.ops.mesh.primitive_cube_add(
+        location=(0, -.184, 1.255), scale=(.065, .006, .015)),
+        armature, "spine_03", teal)
+
+    # A low-profile cap completes the silhouette without requiring hair assets.
+    _primitive("DJCap", lambda: bpy.ops.mesh.primitive_uv_sphere_add(
+        segments=24, ring_count=12, location=(0, -.030, 1.625),
+        scale=(.106, .112, .080)), armature, "head", ink)
+    brim = _primitive("DJCapBrim", lambda: bpy.ops.mesh.primitive_cube_add(
+        location=(0, -.125, 1.625), scale=(.072, .038, .009)),
+        armature, "head", graphite)
+    bevel = brim.modifiers.new("Rounded cap brim", "BEVEL")
+    bevel.width = .012
+    bevel.segments = 3
+
+    # Headphones: a segmented arch and two padded cups, all bound to the head.
+    for index in range(13):
+        angle = math.radians(25 + index * 130 / 12)
+        x = .112 * math.cos(angle)
+        z = 1.575 + .112 * math.sin(angle)
+        _primitive(f"Headband{index:02}", lambda x=x, z=z, angle=angle:
+            bpy.ops.mesh.primitive_uv_sphere_add(segments=10, ring_count=6,
+                location=(x, -.015, z), scale=(.014, .018, .014)),
+            armature, "head", metal)
+    for side in (-1, 1):
+        _primitive(f"HeadphoneCup{'L' if side > 0 else 'R'}", lambda side=side:
+            bpy.ops.mesh.primitive_cylinder_add(vertices=20, radius=.052, depth=.025,
+                location=(side*.105, -.012, 1.575), rotation=(0, math.pi/2, 0)),
+            armature, "head", ink)
+        _primitive(f"HeadphoneRing{'L' if side > 0 else 'R'}", lambda side=side:
+            bpy.ops.mesh.primitive_torus_add(major_radius=.038, minor_radius=.006,
+                major_segments=20, minor_segments=6, location=(side*.119, -.012, 1.575),
+                rotation=(0, math.pi/2, 0)), armature, "head", teal)
+
+    return [shirt, pants]
     body.data.materials.append(material)
 
 
@@ -368,6 +527,7 @@ def main() -> None:
 
     clear_scene()
     body, armature = build(args.rig, neutral=not args.no_neutral_pose)
+    outfit = [] if args.no_outfit else create_outfit(body, armature)
 
     problems = verify(body, armature)
     for problem in problems:
@@ -377,6 +537,7 @@ def main() -> None:
 
     print(f"[OK] mesh   : {body.name} ({len(body.data.vertices)} verts)")
     print(f"[OK] armature: {armature.name} ({len(armature.data.bones)} bones)")
+    print(f"[OK] outfit : {len(outfit)} skinned garment meshes plus DJ accessories")
 
     if args.blend:
         blend = Path(args.blend).resolve()

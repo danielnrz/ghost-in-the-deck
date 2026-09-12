@@ -19,14 +19,17 @@ from test_visual_intent import fake_set
 def test_variants_follow_real_operation_and_tempo_policy():
     spans=[s.span for s in fake_set(True,3)]
     visual=VisualTimeline();visual.update(spans)
-    assert all(i.variant=='knob' for i in visual.interactions if i.operation!='crossfade')
-    assert all(i.variant=='button' for i in visual.interactions if i.operation=='crossfade')
+    assert all(i.variant=='filter_knob' for i in visual.interactions if i.operation=='filter_sweep')
+    assert all(i.variant=='channel_fader' for i in visual.interactions if i.operation=='gain_riser')
+    assert all(i.variant=='button' for i in visual.interactions if i.kind=='TRANSITION_PREPARE')
+    assert all(i.variant=='crossfader' for i in visual.interactions if i.kind=='TRANSITION_MIX')
     mixes=[s for s in spans if s.plan]
     changed=[replace(s,plan=replace(s.plan,bpm_b=s.plan.bpm_a/1.1)) for s in mixes]
     visual.update(changed)
-    assert [i.variant for i in visual.interactions]==['platter','platter']
-    assert [i.deck for i in visual.interactions]==['r','l']
-    assert all(i.contact_end==i.operation_start and i.contact_start<i.contact_end for i in visual.interactions)
+    prepares=[i for i in visual.interactions if i.kind=='TRANSITION_PREPARE']
+    assert [i.variant for i in prepares]==['platter','platter']
+    assert [i.deck for i in prepares]==['r','l']
+    assert all(i.contact_end==i.operation_start and i.contact_start<i.contact_end for i in prepares)
 
 
 def hype_spans(build=True):
@@ -64,7 +67,7 @@ def test_hype_requires_build_is_rare_and_deterministic():
 def test_contact_is_not_a_frozen_pose_and_body_is_decomposed():
     animator=AvatarAnimator(None);state=groove_for().state_at(10)
     for side in ('l','r'):
-        for variant in ('knob','button','platter'):
+        for variant in ('filter_knob','channel_fader','button','platter','crossfader'):
             start=DJActionState(10,'hand_to_deck',.5,1,side,1,variant,0)
             moving=replace(start,contact_phase=.5)
             assert set_pose_offsets(animator,state,start)!=set_pose_offsets(animator,state,moving)
@@ -75,7 +78,7 @@ def test_contact_is_not_a_frozen_pose_and_body_is_decomposed():
 
 
 @pytest.mark.parametrize('side',['l','r'])
-@pytest.mark.parametrize('variant',['knob','button','platter','cheer'])
+@pytest.mark.parametrize('variant',['filter_knob','channel_fader','button','platter','crossfader','cheer'])
 def test_both_hands_clear_equipment_through_all_variants(side,variant):
     import panda_env
     from reach_clearance import ClearanceHarness,SAFETY_MARGIN
@@ -96,14 +99,10 @@ def test_both_hands_clear_equipment_through_all_variants(side,variant):
                 margin,joint,node=harness._worst_mesh(hand,harness.furniture,math.inf)
                 assert margin>SAFETY_MARGIN,(variant,side,hand,progress,margin,joint,node)
             if progress == .5 and variant != 'cheer':
-                # Physical scene coordinates, including asymmetric panel controls.
-                sign = 1 if side == 'l' else -1
-                targets = {'knob': (.204*sign-.0288, -.378, 1.035),
-                           'button': (.204*sign+.045, -.322, 1.030),
-                           'platter': (.34*sign, -.40, 1.032)}
+                from ghost_in_the_deck.animation.workstation import performance_target
                 harness.rig.force_update()
                 finger = harness.rig.expose(f'index_03_{side}').getPos(harness.base.render)
-                assert np.linalg.norm(np.array(finger)-targets[variant]) < .015
+                assert np.linalg.norm(np.array(finger)-performance_target(variant,side)) < .015
         harness.rig.actor.setZ(0)
     finally:
         harness.rig.actor.cleanup();harness.rig.actor.removeNode();harness.workstation.removeNode()

@@ -11,7 +11,11 @@ The separate single-track diagnostic retains its original rig and scheduler.
 ## Hands and physical targets
 
 The live `PerformanceRig` adds modest finger flexion and sufficient forearm
-rotation to orient the palm. The existing mesh and skeleton are unchanged.
+rotation to orient the palm. The deform skeleton remains unchanged. The body
+now carries fitted skinned clothing plus rigidly head/foot-weighted accessories:
+a graphite performance top, dark trousers, cap, headphones and high-top shoes.
+All pieces are generated in the repository's Blender script from MPFB topology
+or Blender primitives; there is no downloaded wardrobe dependency.
 Previously, the fingers were entirely unposed and the wrist carried much of the
 orientation, leaving a sideways fan-shaped hand. Forearm rotation now shares
 that work; the resting fingers curl gently toward the palm on both sides.
@@ -27,13 +31,15 @@ The vocabulary follows the actual operation:
 
 | Situation | Physical interaction |
 | --- | --- |
-| Committed filter sweep or gain riser | Knob reach with one small wrist turn |
+| Committed filter sweep | Owning-deck filter knob with one small turn |
+| Committed gain riser | Owning channel fader with one controlled move |
 | Matched-tempo incoming start | Index-finger tap on the visible start button |
 | Incoming material prepared at a different tempo (>0.5 BPM difference) | Light platter-side cue check, released exactly when incoming playback starts |
+| Real blend long enough for a second interaction | Outgoing hand makes one central crossfader move during the blend |
 
 The platter gesture represents preparation of the already tempo-adjusted cue.
 It never implies scratching, dragging playback, or a new phase correction.
-The control rows, button positions and platter surfaces are distinct targets.
+The filter knobs, channel faders, crossfader, buttons and platter surfaces are distinct targets.
 Asymmetric knob/button positions receive separate left/right calibrations.
 
 Deck A is anatomical left (`l`, +X, viewer right). Deck B is anatomical right
@@ -51,11 +57,14 @@ cooldown. Actions must fit within the owned span, including reserved margins,
 so incremental audio buffering cannot cancel an already-started reach.
 
 Most playback remains listening and groove. Short/broad measured energy and
-trend control intensity. Head, neck, chest and shoulders have different, small
-beat responses with phase offsets; neck counter-rotation reduces inherited
-rigid-body movement. During contact the reaching chain steadies while a small
-amount of torso movement and independent head/neck motion remain. Body poses
-still blend across source handoff for 2.4 seconds without changing audio timing.
+trend control intensity. The owning/incoming side also carries a very small
+readiness posture without touching hardware. Head, neck, chest and shoulders
+have different retained motion, amplitudes and phase delays; local counter-
+rotation reduces inherited rigid-body movement. Deterministic bar variation is
+damped rather than removed, so posture changes without random control work.
+During contact the reaching chain steadies while torso and independent head/neck
+motion remain. Body poses still blend across source handoff for 2.4 seconds
+without changing audio timing.
 
 ## Rare performance accents
 
@@ -112,8 +121,8 @@ gesture. Both decks, hands, and the small bounce stayed in frame. Earlier mesh
 intersections during hand lift and cheer entry were corrected and rerendered;
 the dense clearance checks retain the existing 8 mm margin.
 
-This remains a simple procedural mannequin performance. The improvement is
-articulated hands, distinct factual targets, independent upper-body movement,
-and controlled timing; it does not depend on new character assets or runtime IK.
+The character is deliberately stylized and the animation remains lightweight
+procedural performance rather than motion-captured realism. It uses the existing
+fixed rig and offline-calibrated contacts, not runtime IK.
 All generated music and captures remain local. Private test music is not used
 in committed fixtures.

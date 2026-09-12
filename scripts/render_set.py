@@ -19,13 +19,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out-dir', type=Path, default=ROOT/'out'/'set_review')
     parser.add_argument('--performance',action='store_true',help='measured builds and differing tempos')
+    parser.add_argument('--transition-bars',type=int,default=4,
+                        help='real transition length; defaults to the product setting')
     options = parser.parse_args()
     options.out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='ghost-render-') as temp:
         args = argparse.Namespace(headless=True, no_audio=True, no_actions=False,
             no_fx=False, show_action=None, single_track=False, refresh=False,
             music_dir=str(create_demo(Path(temp)/'music',seconds=70 if options.performance else 50,performance=options.performance)), cache_dir=str(Path(temp)/'cache'),
-            transition_bars=2, dwell=5, track=None, capture_at=[], stall_every=0,
+            transition_bars=options.transition_bars, dwell=5, track=None, capture_at=[], stall_every=0,
             simulate_stall=0, seconds=None)
         app = build_app(args)
         try:

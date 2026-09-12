@@ -19,6 +19,7 @@ APPROACH = 2.0
 RECOVERY = 2.2
 ATTENTION_LEAD = 2.8
 TRANSITION_HOLD = .6
+TRANSITION_RECOVERY = 1.6
 HANDOFF_RECOVERY = 2.4
 MIN_MAJOR_INTERVAL = 12.0
 REPEAT_INTERVAL = 24.0
@@ -53,7 +54,8 @@ class VisualIntent:
 
     @property
     def major(self):
-        return self.intensity > 0 and self.kind in ('FILTER_ADJUST', 'GAIN_ADJUST', 'TRANSITION_PREPARE')
+        return self.intensity > 0 and self.kind in (
+            'FILTER_ADJUST', 'GAIN_ADJUST', 'TRANSITION_PREPARE', 'TRANSITION_MIX')
 
     def action_at(self, now: float) -> DJActionState | None:
         if self.kind == 'HYPE' and self.begin <= now < self.end:
@@ -104,16 +106,30 @@ class VisualTimeline:
         reserved = [(s.start/SAMPLE_RATE-ATTENTION_LEAD,
                      s.end/SAMPLE_RATE+HANDOFF_COOLDOWN) for s in transitions]
         candidates = []
+        mix_actions = []
         for span in transitions:
             start, end = span.start/SAMPLE_RATE, span.end/SAMPLE_RATE
             variant="platter" if abs(span.plan.bpm_a-span.plan.bpm_b) > .5 else "button"
             # A platter cue check releases as playback starts: no fake scratch.
             contact_start = start-.45 if variant=='platter' else start
             contact_end = start if variant=='platter' else min(start+TRANSITION_HOLD,end)
-            candidates.append(VisualIntent('TRANSITION_PREPARE', other_deck(span.deck),
+            prepare = VisualIntent('TRANSITION_PREPARE', other_deck(span.deck),
                 'crossfade', start, end, max(0,contact_start-APPROACH),
-                contact_end+RECOVERY,contact_end=contact_end,variant=variant,
-                contact_start=max(0,contact_start)))
+                contact_end+TRANSITION_RECOVERY,contact_end=contact_end,variant=variant,
+                contact_start=max(0,contact_start))
+            candidates.append(prepare)
+            # On a long real blend, represent the actual linear crossfade once
+            # at the central mixer. Short blends keep the cleaner single prep
+            # action rather than rushing through two gestures.
+            middle = (start+end)/2
+            mix_contact_start, mix_contact_end = middle-.35, middle+.35
+            mix_begin = max(prepare.end, mix_contact_start-1.45)
+            mix_end = mix_contact_end+1.5
+            if (mix_contact_start-mix_begin >= .5 and mix_end <= end-.2):
+                mix_actions.append(VisualIntent('TRANSITION_MIX', span.deck,
+                    'crossfade', start, end, mix_begin, mix_end,
+                    contact_start=mix_contact_start, contact_end=mix_contact_end,
+                    intensity=.85, variant='crossfader'))
         # Transitions take priority, including future committed transitions. If
         # a deliberately tiny dwell makes reaches incompatible, monitor the
         # next blend rather than interrupt a hand that is still returning.
@@ -122,6 +138,13 @@ class VisualTimeline:
             if not accepted or (intent.begin-accepted[-1].begin >= MIN_MAJOR_INTERVAL and
                                 intent.begin >= accepted[-1].operation_end+HANDOFF_COOLDOWN):
                 accepted.append(intent)
+        # A crossfader move is coordinated work inside an already accepted
+        # transition, not an unrelated major action subject to the solo-action
+        # interval. It never overlaps its incoming-deck preparation.
+        accepted_starts = {intent.operation_start for intent in accepted
+                           if intent.kind == 'TRANSITION_PREPARE'}
+        accepted.extend(intent for intent in mix_actions
+                        if intent.operation_start in accepted_starts)
         for span in spans:
             if span.plan is not None:
                 continue  # source-time FX in stretched mixes are not solo knobs
@@ -132,8 +155,9 @@ class VisualTimeline:
                     continue
                 start = offset+action.start
                 end = start+action.duration
+                variant = 'filter_knob' if action.action == 'filter_sweep' else 'channel_fader'
                 intent = VisualIntent(kind, span.deck, action.action, start, end,
-                    start-APPROACH, end+RECOVERY)
+                    start-APPROACH, end+RECOVERY, variant=variant)
                 # Reserve advance attention even before the producer has supplied
                 # the next span. This prevents late queue arrival cancelling a reach.
                 if intent.begin < span.start/SAMPLE_RATE+HANDOFF_COOLDOWN or intent.end > span.end/SAMPLE_RATE-MIN_MAJOR_INTERVAL:

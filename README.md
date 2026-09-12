@@ -51,7 +51,7 @@ To try the complete system without supplying music:
 This synthesizes three short instrumental tracks locally in a temporary folder,
 plays an automatic set, and cleans up the temporary files on exit.
 
-The window shows the avatar and workstation, the active deck, source position,
+The window shows a clothed stylized DJ and workstation, the active deck, source position,
 measured tempo, and the next track while mixing. The avatar briefly reaches toward the incoming deck as a real transition
 starts, monitors the blend, then acknowledges the handoff and settles. Deck A
 is the avatar's left; deck B is its right. Labels on the workstation match the
@@ -60,8 +60,10 @@ status display.
 Control gestures consume effects actually rendered into the committed audio
 and the real transition ledger. They never schedule audio. Most playback is
 restrained groove: measured short/broad energy and trend change body intensity,
-with relaxed articulated hands. Real effects get a small knob turn; transition
-starts get a button tap or a platter-side cue check that releases as playback starts.
+with relaxed articulated hands. A real filter sweep uses the owning deck's
+filter knob; a gain riser uses its mixer channel fader. Transition starts get a
+button tap or platter-side cue check that releases as playback starts. On a
+long enough real blend, the outgoing hand makes one central crossfader move.
 A sustained measured energy rise can earn a rare cheer and small bounce, with
 at least one song skipped afterward and a 90-second minimum gap. Effects can be
 represented on the owning deck, with
@@ -120,10 +122,11 @@ sample ceiling and complementary linear gains avoid integer output clipping.
 This is peak management, not loudness mastering, true-peak limiting, or perceptual
 quality optimization. Existing distortion in a recording cannot be repaired.
 
-The avatar is a simple untextured anatomical mannequin with a calibrated fixed
-rig and workstation. Its gestures represent planned actions; they never cause
-an audio decision. The design is functional rather than a finished character
-art treatment. Final musical taste and animation appeal remain subjective.
+The bundled performer is generated locally from the existing MPFB deform rig:
+a fitted dark DJ outfit, cap, headphones, sneakers, and cyan identity accents
+are skinned to the same runtime skeleton. No downloaded character or clothing
+asset is required. Its gestures represent planned actions; they never cause an
+audio decision. Final musical taste and animation appeal remain subjective.
 
 ## Checks and local smoke test
 

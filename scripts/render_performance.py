@@ -26,7 +26,7 @@ def main():
     try:
         track=app.ledger.spans[0].active
         for side in ('l','r'):
-            for variant in ('knob','button','platter','cheer'):
+            for variant in ('filter_knob','channel_fader','button','platter','crossfader','cheer'):
                 for i,p in enumerate((0,.10,.20,.30,.40,.50,.50,.50,.60,.70,.80,.90,1)):
                     contact_phase={5:0,6:.5,7:1}.get(i,0)
                     kind='small_hype' if variant=='cheer' else 'hand_to_deck'

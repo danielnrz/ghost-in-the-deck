@@ -206,7 +206,12 @@ def build_hand_skin(rig, render, per_joint: int = _SKIN_VERTS_PER_JOINT) -> dict
         inv[name] = m
     joint_set = set(joints)
 
-    geom_np = rig.actor.find("**/+GeomNode")
+    # The dressed performer contains several skinned meshes.  Hand-surface
+    # calibration must continue to read the anatomical body, not whichever
+    # accessory happens to be first in scene-graph order.
+    geom_np = rig.actor.find("**/GhostBody/+GeomNode")
+    if geom_np.isEmpty():
+        geom_np = rig.actor.find("**/+GeomNode")
     vdata = geom_np.node().getGeom(0).getVertexData()
     tbt = vdata.getTransformBlendTable()
     v_reader = GeomVertexReader(vdata, "vertex")

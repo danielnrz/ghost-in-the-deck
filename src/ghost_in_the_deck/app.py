@@ -242,7 +242,9 @@ class GhostApp:
             AmbientLight, CardMaker, DirectionalLight, Vec4,
         )
 
-        self.base.setBackgroundColor(0.05, 0.05, 0.08)
+        # Opaque deep-blue clear colour: offscreen captures otherwise preserve
+        # transparent pixels and look white when contact sheets flatten them.
+        self.base.setBackgroundColor(0.008, 0.012, 0.026, 1.0)
         self.base.disableMouse()
 
         key = DirectionalLight("key")
@@ -252,21 +254,46 @@ class GhostApp:
         self.base.render.setLight(key_np)
 
         rim = DirectionalLight("rim")
-        rim.setColor(Vec4(0.25, 0.35, 0.6, 1))
+        rim.setColor(Vec4(0.12, 0.52, 0.62, 1))
         rim_np = self.base.render.attachNewNode(rim)
         rim_np.setHpr(150, -10, 0)
         self.base.render.setLight(rim_np)
 
         ambient = AmbientLight("ambient")
-        ambient.setColor(Vec4(0.28, 0.28, 0.34, 1))
+        ambient.setColor(Vec4(0.20, 0.22, 0.30, 1))
         self.base.render.setLight(self.base.render.attachNewNode(ambient))
 
-        # A floor makes the body movement readable; nothing else is in the scene.
+        fill = DirectionalLight("magenta-fill")
+        fill.setColor(Vec4(0.42, 0.12, 0.28, 1))
+        fill_np = self.base.render.attachNewNode(fill)
+        fill_np.setHpr(55, -8, 0)
+        self.base.render.setLight(fill_np)
+
+        # A small studio-stage backdrop gives the performer a deliberate visual
+        # identity while keeping the scene focused on hands and equipment.
+        backdrop_maker = CardMaker("stage-backdrop")
+        backdrop_maker.setFrame(-4.0, 4.0, -0.15, 3.0)
+        backdrop = self.base.render.attachNewNode(backdrop_maker.generate())
+        backdrop.setPos(0, .72, 0)
+        backdrop.setColor(.015, .022, .050, 1)
+
         card = CardMaker("floor")
         card.setFrame(-6, 6, -6, 6)
         floor = self.base.render.attachNewNode(card.generate())
         floor.setP(-90)
-        floor.setColor(0.14, 0.14, 0.18, 1)
+        floor.setColor(0.055, 0.060, 0.085, 1)
+
+        from .scene.primitives import box
+        self.stage_accents = []
+        for x, color in ((-.78, (.55, .08, .32, 1)),
+                         (-.70, (.04, .55, .62, 1)),
+                         (.70, (.04, .55, .62, 1)),
+                         (.78, (.55, .08, .32, 1))):
+            bar = box(.018, .018, 1.42, color)
+            bar.reparentTo(self.base.render)
+            bar.setPos(x, .66, .18)
+            bar.setLightOff()
+            self.stage_accents.append(bar)
 
     def _frame_scene(self) -> None:
         """Frame the avatar and the workstation together, from a 3/4 angle.

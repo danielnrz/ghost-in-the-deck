@@ -33,6 +33,7 @@ from ..animation.workstation import (
     TABLE_TOP_THICKNESS,
     TABLE_WIDTH,
     DJWorkstationTargets,
+    performance_target,
 )
 from .primitives import box, cylinder
 
@@ -64,7 +65,9 @@ DECK_COLOR = (0.08, 0.08, 0.09, 1.0)
 MIXER_COLOR = (0.20, 0.20, 0.23, 1.0)
 CONTROL_PANEL_COLOR = (0.18, 0.18, 0.21, 1.0)
 KNOB_COLOR = (0.55, 0.55, 0.58, 1.0)
-FADER_COLOR = (0.75, 0.35, 0.20, 1.0)
+FADER_COLOR = (0.92, 0.30, 0.35, 1.0)
+TEAL_ACCENT = (0.03, 0.72, 0.74, 1.0)
+MAGENTA_ACCENT = (0.75, 0.08, 0.38, 1.0)
 
 
 def build_workstation(
@@ -121,9 +124,19 @@ def _build_deck(root: NodePath, center) -> None:
     # the right hand's reach pass through the mis-placed central mixer.
     base.setPos(x, y, top_z - DECK_HEIGHT)
 
-    platter = cylinder(DECK_RADIUS, DECK_HEIGHT * 0.6, (0.25, 0.25, 0.27, 1.0))
+    accent = TEAL_ACCENT if x > 0 else MAGENTA_ACCENT
+    ring = cylinder(DECK_RADIUS * 1.035, DECK_HEIGHT * .18, accent)
+    ring.setName("deck-accent-l" if x > 0 else "deck-accent-r")
+    ring.reparentTo(root)
+    ring.setPos(x, y, top_z - DECK_HEIGHT * .82)
+
+    platter = cylinder(DECK_RADIUS, DECK_HEIGHT * 0.6, (0.18, 0.19, 0.23, 1.0))
     platter.reparentTo(root)
     platter.setPos(x, y, top_z - DECK_HEIGHT)
+    spindle = cylinder(.009, .018, accent, segments=12)
+    spindle.setName("deck-spindle-l" if x > 0 else "deck-spindle-r")
+    spindle.reparentTo(root)
+    spindle.setPos(x, y, top_z - DECK_HEIGHT * .38)
 
 
 def _build_mixer(root: NodePath, center) -> None:
@@ -140,9 +153,16 @@ def _build_mixer(root: NodePath, center) -> None:
 
     for i in range(2):
         fader = box(*FADER_SIZE, FADER_COLOR)
+        fader.setName(f"channel-fader-{'r' if i == 0 else 'l'}")
         fader.reparentTo(root)
         fx = x + (i - 0.5) * MIXER_WIDTH * 0.4
         fader.setPos(fx, y + MIXER_DEPTH * 0.2, top_z)
+
+    cross = performance_target("crossfader", "l")
+    crossfader = box(.070, .014, .013, TEAL_ACCENT)
+    crossfader.setName("crossfader")
+    crossfader.reparentTo(root)
+    crossfader.setPos(cross[0], cross[1], top_z)
 
 
 def _build_control_cluster(root: NodePath, target, label: str) -> None:
@@ -165,12 +185,14 @@ def _build_control_cluster(root: NodePath, target, label: str) -> None:
     knob = cylinder(KNOB_RADIUS * 1.3, KNOB_HEIGHT, KNOB_COLOR)
     knob.setName(f"control-knob-{label}")
     knob.reparentTo(cluster)
-    knob.setPos(x - CONTROL_PANEL_WIDTH * 0.18, y - CONTROL_PANEL_DEPTH * 0.15, top_z)
+    knob_target = performance_target("filter_knob", label)
+    knob.setPos(knob_target[0], knob_target[1], top_z)
 
     button = box(.028,.025,.012,(.25,.6,.5,1))
     button.setName(f"play-button-{label}")
     button.reparentTo(cluster)
-    button.setPos(x+.045,y+.038,top_z)
+    button_target = performance_target("button", label)
+    button.setPos(button_target[0], button_target[1], top_z)
 
     fader = box(*FADER_SIZE, FADER_COLOR)
     fader.setName(f"control-fader-{label}")

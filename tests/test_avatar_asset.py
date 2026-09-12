@@ -24,6 +24,11 @@ EXPECTED_BONES = [
     "thigh_l", "calf_l", "foot_l",
     "thigh_r", "calf_r", "foot_r",
 ]
+EXPECTED_MESHES = {
+    "base", "OversizedDJTopMesh", "TaperedDJTrousersMesh",
+    "SneakerUpperLMesh", "SneakerUpperRMesh", "DJCapMesh",
+    "HeadphoneCupLMesh", "HeadphoneCupRMesh",
+}
 
 
 def read_glb_json(path: Path) -> dict:
@@ -45,11 +50,13 @@ class TestGlbExport(unittest.TestCase):
 
     def test_mesh_exists(self):
         meshes = self.gltf.get("meshes", [])
-        self.assertEqual(len(meshes), 1)
-        primitives = meshes[0]["primitives"]
-        self.assertTrue(primitives)
-        self.assertIn("POSITION", primitives[0]["attributes"])
-        self.assertIn("NORMAL", primitives[0]["attributes"])
+        names = {mesh.get("name") for mesh in meshes}
+        self.assertFalse(EXPECTED_MESHES - names, f"missing performer meshes: {EXPECTED_MESHES - names}")
+        for mesh in meshes:
+            primitives = mesh["primitives"]
+            self.assertTrue(primitives, mesh.get("name"))
+            self.assertIn("POSITION", primitives[0]["attributes"])
+            self.assertIn("NORMAL", primitives[0]["attributes"])
 
     def test_skin_exists_with_expected_bones(self):
         skins = self.gltf.get("skins", [])
@@ -60,9 +67,16 @@ class TestGlbExport(unittest.TestCase):
         self.assertFalse(missing, f"missing bones in GLB: {missing}")
 
     def test_mesh_is_skinned(self):
-        primitive = self.gltf["meshes"][0]["primitives"][0]
-        self.assertIn("JOINTS_0", primitive["attributes"])
-        self.assertIn("WEIGHTS_0", primitive["attributes"])
+        for mesh in self.gltf["meshes"]:
+            primitive = mesh["primitives"][0]
+            self.assertIn("JOINTS_0", primitive["attributes"], mesh.get("name"))
+            self.assertIn("WEIGHTS_0", primitive["attributes"], mesh.get("name"))
+
+    def test_character_has_deliberate_outfit_materials(self):
+        names = {item.get("name") for item in self.gltf.get("materials", [])}
+        expected = {"GhostSkin", "MidnightFabric", "GraphiteFabric",
+                    "GhostTeal", "WarmSneakerCanvas", "HeadphoneMetal"}
+        self.assertFalse(expected - names, f"missing performer materials: {expected - names}")
 
     def test_no_sparse_accessors(self):
         """panda3d-gltf cannot read sparse accessors, so none may be exported."""

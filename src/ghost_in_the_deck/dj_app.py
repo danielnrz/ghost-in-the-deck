@@ -159,8 +159,14 @@ class LiveDJApp:
         # Continuous measured energy/trend, no threshold-triggered gestures or
         # hash-selected body character. Quiet music can be almost still.
         intensity = max(.12, min(.62, .14+.44*level+.10*trend))
+        variation = state.variation
         return replace(state, intensity=intensity, pulse=state.pulse*.45,
-            variation=GrooveVariation(1, 0, .12, .15))
+            variation=GrooveVariation(
+                .94 + .18 * (variation.emphasis-.85)/.30,
+                variation.head_bias*.28,
+                variation.shoulder_bias*.38,
+                variation.lead_side*.48,
+            ))
 
     def pose_at(self, now):
         span = self.ledger.at(now)
@@ -169,7 +175,7 @@ class LiveDJApp:
         intent = self.visual.at(now, span.deck)
         action = None if self.args.no_actions else intent.action_at(now)
         state = self._groove_state(span.active, source_time)
-        offsets = set_pose_offsets(self.animator, state, action)
+        offsets = set_pose_offsets(self.animator, state, action, monitor_side=span.deck)
         # Ownership changes exactly on the audio sample. Blend *body offsets*
         # from the continuing outgoing groove to the new source for one bar;
         # do not interpolate source clocks or delay the actual handoff.
@@ -178,7 +184,8 @@ class LiveDJApp:
             previous = self.ledger.spans[index-1]
             if previous.active.path != span.active.path:
                 old_time = (previous.source_start+previous.end-previous.start)/SAMPLE_RATE + now-span.start/SAMPLE_RATE
-                old = set_pose_offsets(self.animator, self._groove_state(previous.active, old_time), action)
+                old = set_pose_offsets(self.animator, self._groove_state(previous.active, old_time),
+                                       action, monitor_side=previous.deck)
                 w = _smoothstep((now-span.start/SAMPLE_RATE)/HANDOFF_RECOVERY)
                 offsets = {j: tuple(a+(b-a)*w for a,b in zip(old.get(j,(0,0,0)), offsets.get(j,(0,0,0))))
                            for j in old.keys() | offsets.keys()}
@@ -204,6 +211,14 @@ class LiveDJApp:
         self.rig.actor.setZ(hype_lift(action))
         for name, (h,p,r) in offsets.items():
             self.rig.set_offset(name, heading=h, pitch=p, roll=r)
+        # Stage accents breathe from the same measured musical state as the
+        # body.  They communicate energy without claiming a deck operation.
+        state = self._groove_state(span.active, source_time)
+        glow = .42 + .50 * state.intensity + .12 * state.pulse
+        if span.plan is not None:
+            glow += .10
+        for index, bar in enumerate(getattr(self, 'stage_accents', ())):
+            bar.setColorScale(glow * (1.0 if index % 2 else .82))
         if span.active.path != self._last_track:
             print(f'Deck {deck_label(span.deck)}: {span.active.path.name}', flush=True)
             self._last_track = span.active.path

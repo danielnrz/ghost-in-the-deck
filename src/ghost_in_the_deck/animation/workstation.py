@@ -128,6 +128,32 @@ DEFAULT_TARGETS = DJWorkstationTargets(
 )
 
 
+def performance_target(variant: str, side: str) -> Point:
+    """Exact visible contact point for a factual live interaction.
+
+    These coordinates are shared by pose tests and the workstation builder.
+    The asymmetric side-panel offsets are intentional: both panels use the
+    same local hardware layout rather than mirroring the knob and button.
+    """
+    if side not in ("l", "r"):
+        raise ValueError(f"unknown rig side: {side}")
+    sign = 1 if side == "l" else -1
+    if variant in ("knob", "filter_knob"):
+        controls = DEFAULT_TARGETS.controls_for(side)
+        return (controls[0] - .0288, controls[1] - .018, controls[2] + .035)
+    if variant == "button":
+        controls = DEFAULT_TARGETS.controls_for(side)
+        return (controls[0] + .045, controls[1] + .038, controls[2] + .030)
+    if variant == "platter":
+        deck = DEFAULT_TARGETS.deck_for(side)
+        return (deck[0], deck[1] + .060, deck[2] + .032)
+    if variant == "channel_fader":
+        return (.060 * sign, -.3124, DEFAULT_TARGETS.surface_height + .077)
+    if variant == "crossfader":
+        return (0.0, -.272, DEFAULT_TARGETS.surface_height + .077)
+    raise ValueError(f"unknown performance target: {variant}")
+
+
 def tabletop_bounds() -> tuple[Point, Point]:
     """The tabletop slab's axis-aligned world-space corners, ``(min, max)``.
 
