@@ -61,7 +61,7 @@ class VisualIntent:
         if self.kind == 'HYPE' and self.begin <= now < self.end:
             progress=(now-self.begin)/(self.end-self.begin)
             return DJActionState(now,'small_hype',progress,
-                _envelope_weight('small_hype',progress),self.deck,.55,'cheer')
+                _envelope_weight('small_hype',progress),self.deck,.55,self.variant)
         if not self.major or not self.begin <= now < self.end:
             return None
         # Traverse approach, stationary contact, and recovery once. The live
@@ -199,8 +199,9 @@ class VisualTimeline:
                     continue
                 if any(now < a.end+8 and now+3.2 > a.begin-8 for a in self.interactions if a.operation=='crossfade'):
                     continue
+                variant = 'fist_pump' if (track_number//2) % 2 == 0 else 'cheer'
                 hypes.append(VisualIntent('HYPE',span.deck,'measured_energy_lift',now,now+3.2,
-                                         now,now+3.2,intensity=.55,variant='cheer'))
+                                         now,now+3.2,intensity=.55,variant=variant))
                 last_track=track_number;last_time=now
                 break
         return tuple(hypes)

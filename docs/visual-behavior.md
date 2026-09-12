@@ -78,8 +78,9 @@ At most one 3.2-second accent is selected per eligible song, at least one entire
 song is skipped afterward, and starts are at least 90 seconds apart. Accents
 must fit in solo playback away from transitions and handoffs. Real transition
 work wins; a rare accent can suppress an optional solo-effect representation
-while leaving that effect's audio unchanged. The gesture is one modest raised
-fist/wave with a 3.5 cm vertical bounce and soft knee accent, followed by recovery.
+while leaving that effect's audio unchanged. Admitted accents alternate
+deterministically between an open-hand greeting wave and a compact fist pump,
+both with a 3.5 cm vertical bounce and soft knee accent, followed by recovery.
 `--no-actions` disables it; `--no-fx` only disables the solo effects.
 
 ## Reproducible review
@@ -90,6 +91,7 @@ Use a working graphics display:
 .venv/bin/python scripts/render_set.py
 .venv/bin/python scripts/render_set.py --performance --out-dir out/performance_set
 .venv/bin/python scripts/render_performance.py
+.venv/bin/python scripts/render_performance.py --view hands --out-dir out/hand_review
 .venv/bin/python scripts/make_performance_demo.py
 ./run.sh --music-dir ./out/performance_music --transition-bars 2 --dwell 5
 ```

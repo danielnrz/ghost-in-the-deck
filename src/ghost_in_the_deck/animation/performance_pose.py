@@ -110,6 +110,7 @@ def set_pose_offsets(animator, state, action, monitor_side=None):
         side = action.side
         w = action.weight
         sign=1 if side=='l' else -1
+        pump=action.variant=='fist_pump'
         clearance=((0,0,-55*sign),(0,-30,0),(0,0,0))
         if w < .4:
             first,last,blend=((0,0,0),)*3,clearance,_smoothstep(w/.4)
@@ -123,11 +124,21 @@ def set_pose_offsets(animator, state, action, monitor_side=None):
             for segment in (1,2,3):
                 name=f'{finger}_0{segment}_{side}'
                 base=offsets.get(name,(0,0,0))[1]
-                curl=(20 if finger=='thumb' else 35) if segment < 3 else 10
+                if pump:
+                    curl=(20 if finger=='thumb' else 35) if segment < 3 else 10
+                else:
+                    curl=(12 if finger=='thumb' else 8) if segment < 3 else 4
                 offsets[name]=(0,base+(curl-base)*w,0)
-        # One modest greeting wave and a soft knee accent; no flailing loop.
+        # Alternate deterministic accents: an open greeting wave or one compact
+        # fist pump. Both share the same rare measured-energy admission policy.
         h,p,r=offsets[f'hand_{side}']
-        offsets[f'hand_{side}']=(h+4*math.sin(2*math.pi*action.progress)*w,p,r)
+        if pump:
+            offsets[f'hand_{side}']=(h,p-3*math.sin(math.pi*action.progress)*w,r)
+            lower=f'lowerarm_{side}'
+            lh,lp,lr=offsets[lower]
+            offsets[lower]=(lh,lp+5*math.sin(math.pi*action.progress)*w,lr)
+        else:
+            offsets[f'hand_{side}']=(h+4*math.sin(2*math.pi*action.progress)*w,p,r)
         for leg in ('l','r'):
             h, p, r = offsets[f'calf_{leg}']
             offsets[f'calf_{leg}'] = (h, p+3*w, r)

@@ -16,6 +16,7 @@ from ghost_in_the_deck.animation.performance_pose import hype_lift
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out-dir',type=Path,default=ROOT/'out/performance_review')
+    parser.add_argument('--view',choices=('wide','hands'),default='wide')
     options=parser.parse_args();out=options.out_dir;out.mkdir(parents=True,exist_ok=True)
     args=argparse.Namespace(headless=True,no_audio=True,no_actions=False,no_fx=False,
         show_action=None,single_track=False,refresh=False,
@@ -24,12 +25,16 @@ def main():
         simulate_stall=0,seconds=None)
     app=build_app(args)
     try:
+        if options.view == 'hands':
+            app.base.camera.setPos(.48,-1.48,1.36)
+            app.base.camera.lookAt(0,-.37,1.08)
         track=app.ledger.spans[0].active
         for side in ('l','r'):
-            for variant in ('filter_knob','channel_fader','button','platter','crossfader','cheer'):
+            for variant in ('filter_knob','channel_fader','button','platter',
+                            'crossfader','cheer','fist_pump'):
                 for i,p in enumerate((0,.10,.20,.30,.40,.50,.50,.50,.60,.70,.80,.90,1)):
                     contact_phase={5:0,6:.5,7:1}.get(i,0)
-                    kind='small_hype' if variant=='cheer' else 'hand_to_deck'
+                    kind='small_hype' if variant in ('cheer','fist_pump') else 'hand_to_deck'
                     action=DJActionState(10,kind,p,_envelope_weight(kind,p),side,1,variant,contact_phase)
                     app.rig.actor.setZ(hype_lift(action))
                     write_set_pose(app.animator,app._groove_state(track,10+i/10),action)

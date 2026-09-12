@@ -50,6 +50,7 @@ def test_hype_requires_build_is_rare_and_deterministic():
     visual=VisualTimeline();visual.update(hype_spans(False));assert not visual.hypes
     spans=hype_spans();visual.update(spans)
     assert len(visual.hypes)==2
+    assert [intent.variant for intent in visual.hypes]==['fist_pump','cheer']
     assert visual.hypes[1].begin-visual.hypes[0].begin>=240
     assert {int(i.begin//120) for i in visual.hypes}=={0,2}
     again=VisualTimeline();again.update(spans);assert visual.hypes==again.hypes
@@ -78,7 +79,8 @@ def test_contact_is_not_a_frozen_pose_and_body_is_decomposed():
 
 
 @pytest.mark.parametrize('side',['l','r'])
-@pytest.mark.parametrize('variant',['filter_knob','channel_fader','button','platter','crossfader','cheer'])
+@pytest.mark.parametrize('variant',['filter_knob','channel_fader','button','platter',
+                                    'crossfader','cheer','fist_pump'])
 def test_both_hands_clear_equipment_through_all_variants(side,variant):
     import panda_env
     from reach_clearance import ClearanceHarness,SAFETY_MARGIN
@@ -87,7 +89,7 @@ def test_both_hands_clear_equipment_through_all_variants(side,variant):
     animator=AvatarAnimator(harness.rig);groove=groove_for()
     try:
         for progress in np.linspace(0,1,181):
-            kind='small_hype' if variant=='cheer' else 'hand_to_deck'
+            kind='small_hype' if variant in ('cheer','fist_pump') else 'hand_to_deck'
             from ghost_in_the_deck.animation.dj_behavior import _envelope_weight
             action=DJActionState(10,kind,progress,_envelope_weight(kind,progress),side,1,variant,.5)
             offsets=set_pose_offsets(animator,groove.state_at(10+progress),action)
@@ -98,7 +100,7 @@ def test_both_hands_clear_equipment_through_all_variants(side,variant):
             for hand in ('l','r'):
                 margin,joint,node=harness._worst_mesh(hand,harness.furniture,math.inf)
                 assert margin>SAFETY_MARGIN,(variant,side,hand,progress,margin,joint,node)
-            if progress == .5 and variant != 'cheer':
+            if progress == .5 and variant not in ('cheer','fist_pump'):
                 from ghost_in_the_deck.animation.workstation import performance_target
                 harness.rig.force_update()
                 finger = harness.rig.expose(f'index_03_{side}').getPos(harness.base.render)

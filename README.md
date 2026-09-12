@@ -64,7 +64,8 @@ with relaxed articulated hands. A real filter sweep uses the owning deck's
 filter knob; a gain riser uses its mixer channel fader. Transition starts get a
 button tap or platter-side cue check that releases as playback starts. On a
 long enough real blend, the outgoing hand makes one central crossfader move.
-A sustained measured energy rise can earn a rare cheer and small bounce, with
+A sustained measured energy rise can earn a rare open-hand cheer or compact
+fist pump with a small bounce, with
 at least one song skipped afterward and a 90-second minimum gap. Effects can be
 represented on the owning deck, with
 12-second minimum spacing, 24 seconds before the same effect repeats, and six
@@ -165,7 +166,8 @@ instead of `:1`. The live runtime can also save frames with
 `--capture-at 10 40 --capture-dir out/set_review`.
 
 See [live performance policies and review commands](docs/visual-behavior.md)
-for the hand variants and rare musical accents.
+for the hand variants and rare musical accents, and the
+[character pipeline](docs/character-pipeline.md) for the reproducible asset build.
 
 The earlier single-track diagnostics remain available via `--single-track`;
 `--show-action hand_to_deck` selects an isolated gesture review. Beat reports,
