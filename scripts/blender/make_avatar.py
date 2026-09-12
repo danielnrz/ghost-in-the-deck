@@ -269,6 +269,18 @@ def create_outfit(body, armature):
     bevel.width = .012
     bevel.segments = 3
 
+    # A slim dark visor covers MPFB's untextured eye treatment and reinforces
+    # the virtual-performer identity without turning the face into a helmet.
+    visor = _primitive("GhostVisor", lambda: bpy.ops.mesh.primitive_cube_add(
+        location=(0, -.174, 1.580), scale=(.073, .007, .020)),
+        armature, "head", metal)
+    bevel = visor.modifiers.new("Rounded visor", "BEVEL")
+    bevel.width = .012
+    bevel.segments = 4
+    _primitive("VisorSignal", lambda: bpy.ops.mesh.primitive_cube_add(
+        location=(0, -.183, 1.578), scale=(.058, .002, .003)),
+        armature, "head", teal)
+
     # Headphones: a segmented arch and two padded cups, all bound to the head.
     for index in range(13):
         angle = math.radians(25 + index * 130 / 12)

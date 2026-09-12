@@ -26,7 +26,7 @@ EXPECTED_BONES = [
 ]
 EXPECTED_MESHES = {
     "base", "OversizedDJTopMesh", "TaperedDJTrousersMesh",
-    "SneakerUpperLMesh", "SneakerUpperRMesh", "DJCapMesh",
+    "SneakerUpperLMesh", "SneakerUpperRMesh", "DJCapMesh", "GhostVisorMesh",
     "HeadphoneCupLMesh", "HeadphoneCupRMesh",
 }
 

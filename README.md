@@ -124,7 +124,7 @@ This is peak management, not loudness mastering, true-peak limiting, or perceptu
 quality optimization. Existing distortion in a recording cannot be repaired.
 
 The bundled performer is generated locally from the existing MPFB deform rig:
-a fitted dark DJ outfit, cap, headphones, sneakers, and cyan identity accents
+a fitted dark DJ outfit, cap, slim visor, headphones, sneakers, and cyan identity accents
 are skinned to the same runtime skeleton. No downloaded character or clothing
 asset is required. Its gestures represent planned actions; they never cause an
 audio decision. Final musical taste and animation appeal remain subjective.

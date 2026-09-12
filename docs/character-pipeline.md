@@ -6,8 +6,8 @@ then aligns the rig, bakes the relaxed bind stance, and builds the DJ identity:
 
 - fitted top and trousers are cut from copies of the baked body topology, so
   they retain the exact armature weights;
-- sneakers, cap, chest mark, and headphones are Blender primitives weighted to
-  the appropriate deform bones;
+- sneakers, cap, slim visor, chest mark, and headphones are Blender primitives
+  weighted to the appropriate deform bones;
 - six simple glTF-safe materials provide skin, fabric, footwear, metal, and the
   cyan identity accent;
 - no downloaded clothing, logo, texture, animation, or proprietary character
