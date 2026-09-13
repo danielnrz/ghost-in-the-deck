@@ -55,6 +55,10 @@ CHEER = {'l_cheer': [[-27.72, -17.066, -84.956],
  'r_cheer': [[27.699, -17.085, 84.97],
              [12.423, 75.692, 13.073],
              [-8.861, 4.117, 8.801]]}
+FIST_PUMP = {
+    'l_fist_pump': [[-18, -8, -58], [-8, 85, -8], [6, 0, -6]],
+    'r_fist_pump': [[18, -8, 58], [8, 85, 8], [-6, 0, 6]],
+}
 
 def finger_offsets(side, amount=1.0):
     """Give every phalanx a loose, graduated resting curve."""
@@ -111,11 +115,14 @@ def set_pose_offsets(animator, state, action, monitor_side=None):
         w = action.weight
         sign=1 if side=='l' else -1
         pump=action.variant=='fist_pump'
+        accent = FIST_PUMP[f'{side}_fist_pump'] if pump else CHEER[f'{side}_cheer']
         clearance=((0,0,-55*sign),(0,-30,0),(0,0,0))
-        if w < .4:
-            first,last,blend=((0,0,0),)*3,clearance,_smoothstep(w/.4)
+        clearance_end = .35 if pump else .4
+        if w < clearance_end:
+            first,last,blend=((0,0,0),)*3,clearance,_smoothstep(w/clearance_end)
         else:
-            first,last,blend=clearance,CHEER[f'{side}_cheer'],_smoothstep((w-.4)/.6)
+            first,last,blend=clearance,accent,_smoothstep(
+                (w-clearance_end)/(1-clearance_end))
         for joint,a,b in zip(('upperarm','lowerarm','hand'),first,last):
             name = f'{joint}_{side}'
             base = offsets.get(name, (0, 0, 0))
@@ -125,7 +132,7 @@ def set_pose_offsets(animator, state, action, monitor_side=None):
                 name=f'{finger}_0{segment}_{side}'
                 base=offsets.get(name,(0,0,0))[1]
                 if pump:
-                    curl=(20 if finger=='thumb' else 35) if segment < 3 else 10
+                    curl=(30 if finger=='thumb' else 42) if segment < 3 else 38
                 else:
                     curl=(12 if finger=='thumb' else 8) if segment < 3 else 4
                 offsets[name]=(0,base+(curl-base)*w,0)

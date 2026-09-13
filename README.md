@@ -51,9 +51,10 @@ To try the complete system without supplying music:
 This synthesizes three short instrumental tracks locally in a temporary folder,
 plays an automatic set, and cleans up the temporary files on exit.
 
-The window shows a clothed stylized DJ and workstation, the active deck, source position,
-measured tempo, and the next track while mixing. The avatar briefly reaches toward the incoming deck as a real transition
-starts, monitors the blend, then acknowledges the handoff and settles. Deck A
+The window shows a clothed stylized DJ and workstation, the active deck, source
+position, measured tempo, and the next track while mixing. The avatar briefly
+reaches toward the incoming deck as a real transition starts, monitors the
+blend, then acknowledges the handoff and settles. Deck A
 is the avatar's left; deck B is its right. Labels on the workstation match the
 status display.
 
@@ -124,10 +125,11 @@ This is peak management, not loudness mastering, true-peak limiting, or perceptu
 quality optimization. Existing distortion in a recording cannot be repaired.
 
 The bundled performer is generated locally from the existing MPFB deform rig:
-a fitted dark DJ outfit, cap, slim visor, headphones, sneakers, and cyan identity accents
-are skinned to the same runtime skeleton. No downloaded character or clothing
-asset is required. Its gestures represent planned actions; they never cause an
-audio decision. Final musical taste and animation appeal remain subjective.
+a fitted dark DJ outfit, cap, slim visor, headphones, sneakers, and cyan
+identity accents are skinned to the same runtime skeleton. No downloaded
+character or clothing asset is required. Its gestures represent planned
+actions; they never cause an audio decision. Final musical taste and animation
+appeal remain subjective.
 
 ## Checks and local smoke test
 

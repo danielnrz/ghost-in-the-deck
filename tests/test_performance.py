@@ -129,10 +129,11 @@ def test_rare_accent_reserves_space_without_changing_audio_records():
 
 
 @pytest.mark.parametrize('side', ['l', 'r'])
-def test_hype_has_no_frame_scale_joint_snap_at_entry_or_recovery(side):
+@pytest.mark.parametrize('variant', ['cheer', 'fist_pump'])
+def test_hype_has_no_frame_scale_joint_snap_at_entry_or_recovery(side, variant):
     from ghost_in_the_deck.animation.visual_intent import VisualIntent
     intent = VisualIntent('HYPE', side, 'measured_energy_lift', 10, 13.2,
-                          10, 13.2, variant='cheer')
+                          10, 13.2, variant=variant)
     animator = AvatarAnimator(None)
     groove = groove_for()
     previous = None
@@ -144,3 +145,16 @@ def test_hype_has_no_frame_scale_joint_snap_at_entry_or_recovery(side):
                           for a, b in zip(pose[joint], previous.get(joint, (0, 0, 0))))
             assert maximum < 8, (now, maximum)
         previous = pose
+
+
+def test_fist_pump_is_compact_and_fully_closes_the_fingers():
+    animator = AvatarAnimator(None)
+    state = groove_for().state_at(10)
+    cheer = DJActionState(10, 'small_hype', .5, 1, 'l', 1, 'cheer')
+    pump = replace(cheer, variant='fist_pump')
+    cheer_pose = set_pose_offsets(animator, state, cheer)
+    pump_pose = set_pose_offsets(animator, state, pump)
+    assert pump_pose['upperarm_l'][2] > cheer_pose['upperarm_l'][2] + 20
+    assert pump_pose['lowerarm_l'][1] > cheer_pose['lowerarm_l'][1] + 8
+    assert all(pump_pose[f'{finger}_02_l'][1] >= 40
+               for finger in ('index', 'middle', 'ring', 'pinky'))

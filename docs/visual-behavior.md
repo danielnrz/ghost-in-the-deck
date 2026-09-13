@@ -13,7 +13,8 @@ The separate single-track diagnostic retains its original rig and scheduler.
 The live `PerformanceRig` adds modest finger flexion and sufficient forearm
 rotation to orient the palm. The deform skeleton remains unchanged. The body
 now carries fitted skinned clothing plus rigidly head/foot-weighted accessories:
-a graphite performance top, dark trousers, cap, headphones and high-top shoes.
+a graphite performance top, dark trousers, cap, slim visor, headphones and
+high-top shoes.
 All pieces are generated in the repository's Blender script from MPFB topology
 or Blender primitives; there is no downloaded wardrobe dependency.
 Previously, the fingers were entirely unposed and the wrist carried much of the
@@ -107,21 +108,27 @@ rare/absent hype, deterministic replay, deck ownership, joint limits and dense
 mesh clearance. Actual image sequences and real-time OpenAL captures remain
 part of review because numerical checks alone cannot establish believability.
 
-### Performance polish validation (2026-09-11)
+### Virtual-DJ completion validation (2026-09-13)
 
-The display-enabled full suite passed 525 tests and 7,919 subtests. The final
-focused performance run passed 14 tests, including additional 60 Hz cheer
-boundary checks and contact accuracy for all three targets on both sides.
-The real synthetic-library E2E also completed two audio transitions.
+The display-enabled full suite passed 537 tests and 7,919 subtests. The final
+focused character/performance/intent/live run passed 51 tests; the dedicated
+performance pass added 23 checks over both sides, all five equipment targets,
+both rare accents, 60 Hz boundaries, joint limits, and dense mesh clearance.
+The real synthetic-library E2E also completed two PCM transitions.
 
-Review artifacts in local, ignored `out/performance_polish` include 197 standard
-set frames, 184 performance-set frames, and 104 isolated variant frames. Actual
-images were inspected across approach, contact, recovery, both handoffs, and
-the rare accent. A 130-second OpenAL run completed A -> B -> A with one measured
-energy accent, platter preparation in both directions, and a later gain-control
-gesture. Both decks, hands, and the small bounce stayed in frame. Earlier mesh
-intersections during hand lift and cheer entry were corrected and rerendered;
-the dense clearance checks retain the existing 8 mm margin.
+Release review artifacts in local, ignored `out/final_experience` and
+`out/final_hands` contain 184 production-ledger frames and 182 isolated variant
+frames. Images were inspected as sequences across low and strong groove,
+attention, approach, each distinct contact, both transition directions,
+handoff, recovery, cheer, and fist pump. The compact pump was corrected after
+the first review, then retested and rerendered. The dense clearance checks
+retain the existing 8 mm margin.
+
+A 75-second rendered OpenAL demo completed A -> B -> A. A separate 235-second
+rendered OpenAL run against the local private library completed the first two
+musically planned handoffs, again A -> B -> A, with no device, clock, decode,
+planner, buffer, or transition error. A before/after aggregate source checksum
+was identical; no private filename or media is tracked.
 
 The character is deliberately stylized and the animation remains lightweight
 procedural performance rather than motion-captured realism. It uses the existing
